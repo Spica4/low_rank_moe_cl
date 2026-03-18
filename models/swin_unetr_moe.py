@@ -7,6 +7,8 @@ MONAIのSwinUNETRをベースに:
 2. 言語ガイド付きゲーティングでエキスパートを選択
 3. 各ステップでエキスパートを追加・凍結
 """
+import weakref
+
 import torch
 import torch.nn as nn
 from typing import List, Dict
@@ -24,14 +26,16 @@ class _MoEFFNWrapper(nn.Module):
     def __init__(self, moe_ffn: LoRAMoEFFN, model_ref: "SwinUNETRMoE"):
         super().__init__()
         self.moe_ffn = moe_ffn
-        self._model = model_ref
+        # weakref を使い PyTorch のモジュールツリーに循環参照を作らない
+        self._model_ref = weakref.ref(model_ref)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.moe_ffn.num_experts == 0:
             # エキスパート未追加時はベース重みのみで計算
             h = self.moe_ffn.activation(self.moe_ffn.base_wi(x))
             return self.moe_ffn.base_wo(h)
-        return self.moe_ffn.forward_single_expert(x, self._model._current_expert_idx)
+        expert_idx = self._model_ref()._current_expert_idx
+        return self.moe_ffn.forward_single_expert(x, expert_idx)
 
 
 class _MoEAttnWrapper(nn.Module):
@@ -44,7 +48,8 @@ class _MoEAttnWrapper(nn.Module):
     def __init__(self, moe_attn: LoRAMoEAttention, model_ref: "SwinUNETRMoE"):
         super().__init__()
         self.moe_attn = moe_attn
-        self._model = model_ref
+        # weakref を使い PyTorch のモジュールツリーに循環参照を作らない
+        self._model_ref = weakref.ref(model_ref)
 
     def forward(self, x: torch.Tensor, mask=None) -> tuple:
         if self.moe_attn.num_experts == 0:
@@ -62,9 +67,8 @@ class _MoEAttnWrapper(nn.Module):
             out = (attn @ v).transpose(1, 2).reshape(B, N, C)
             out = self.moe_attn.proj(out)
             return out, None
-        out = self.moe_attn.forward_single_expert(
-            x, self._model._current_expert_idx, mask=mask
-        )
+        expert_idx = self._model_ref()._current_expert_idx
+        out = self.moe_attn.forward_single_expert(x, expert_idx, mask=mask)
         return out, None
 
 
