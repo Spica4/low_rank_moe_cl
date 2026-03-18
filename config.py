@@ -57,15 +57,15 @@ class TrainConfig:
 class DataConfig:
     """データセット設定（差し替え可能）"""
     # Step1 データセット
-    step1_name: str = "dataset1"
-    step1_train_dir: str = "./data/step1/train"
-    step1_val_dir: str = "./data/step1/val"
+    step1_name: str = "BTCV"
+    step1_train_dir: str = "/deeparea/sokabe/Dataset/BTCV/Abdomen/train"
+    step1_val_dir: str = "/deeparea/sokabe/Dataset/BTCV/Abdomen/validation"
     step1_num_classes: int = 14             # 例: BTCV = 13クラス + 背景
 
     # Step2 データセット
-    step2_name: str = "dataset2"
-    step2_train_dir: str = "./data/step2/train"
-    step2_val_dir: str = "./data/step2/val"
+    step2_name: str = "LiTS"
+    step2_train_dir: str = "/deeparea/sokabe/Dataset/LiTS/train"
+    step2_val_dir: str = "/deeparea/sokabe/Dataset/LiTS/validation"
     step2_num_classes: int = 2              # 例: LiTS = 肝腫瘍 + 背景（新規クラス）
 
     # Step1 + Step2 の合計クラス数
