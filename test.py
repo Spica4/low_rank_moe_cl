@@ -12,6 +12,8 @@
                  --step2_test_dir /path/to/step2/test
 """
 import argparse
+import csv
+import os
 import torch
 from config import Config
 from models.swin_unetr_moe import SwinUNETRMoE
@@ -62,7 +64,7 @@ def evaluate_dataset(
         if cls_key != "mean":
             print(f"  {cls_key}: {avg_dice[cls_key]:.4f}")
 
-    return avg_dice
+    return avg_dice, num_samples
 
 
 def main():
@@ -74,6 +76,8 @@ def main():
     parser.add_argument("--step2_test_dir", type=str, default=None,
                         help="Step2テストデータのディレクトリ")
     parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--output_csv", type=str, default="results.csv",
+                        help="結果を保存するCSVファイルパス")
     args = parser.parse_args()
 
     config = Config()
@@ -99,6 +103,8 @@ def main():
     # チェックポイント読み込み
     load_checkpoint(model, args.checkpoint, device=args.device)
 
+    all_results = []
+
     # Step1データセットの評価
     if args.step1_test_dir:
         step1_loader = get_dataloader(
@@ -106,12 +112,13 @@ def main():
             batch_size=1,
             is_train=False,
         )
-        evaluate_dataset(
+        avg_dice, num_samples = evaluate_dataset(
             model, step1_loader,
             num_classes=config.data.total_num_classes,
             device=args.device,
             dataset_name=config.data.step1_name,
         )
+        all_results.append((config.data.step1_name, num_samples, avg_dice))
 
     # Step2データセットの評価
     if args.step2_test_dir:
@@ -120,12 +127,26 @@ def main():
             batch_size=1,
             is_train=False,
         )
-        evaluate_dataset(
+        avg_dice, num_samples = evaluate_dataset(
             model, step2_loader,
             num_classes=config.data.total_num_classes,
             device=args.device,
             dataset_name=config.data.step2_name,
         )
+        all_results.append((config.data.step2_name, num_samples, avg_dice))
+
+    # CSVへの保存
+    if all_results:
+        os.makedirs(os.path.dirname(args.output_csv) or ".", exist_ok=True)
+        cls_keys = sorted(k for k in all_results[0][2].keys() if k != "mean")
+        with open(args.output_csv, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["dataset", "num_samples", "mean_dice"] + cls_keys)
+            for dataset_name, num_samples, avg_dice in all_results:
+                row = [dataset_name, num_samples, f"{avg_dice.get('mean', 0.0):.4f}"]
+                row += [f"{avg_dice.get(k, 0.0):.4f}" for k in cls_keys]
+                writer.writerow(row)
+        print(f"\n結果を保存しました: {args.output_csv}")
 
 
 if __name__ == "__main__":
