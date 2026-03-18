@@ -96,6 +96,9 @@ class GenericMedicalDataset(Dataset):
             glob.glob(os.path.join(image_dir, "*.nii.gz")) +
             glob.glob(os.path.join(image_dir, "*.nii"))
         )
+
+        print(f"[データセットスキャン] {len(images)} 画像が見つかりました: {image_dir}")
+
         data = []
         for img_path in images:
             filename = os.path.basename(img_path)
