@@ -86,10 +86,16 @@ class GenericMedicalDataset(Dataset):
 
         if not os.path.exists(image_dir):
             # フラットなディレクトリ構造の場合
-            images = sorted(glob.glob(os.path.join(data_dir, "*.nii.gz")))
+            images = sorted(
+                glob.glob(os.path.join(data_dir, "*.nii.gz")) +
+                glob.glob(os.path.join(data_dir, "*.nii"))
+            )
             return [{"image": img, "label": img.replace("image", "label")} for img in images]
 
-        images = sorted(glob.glob(os.path.join(image_dir, "*.nii.gz")))
+        images = sorted(
+            glob.glob(os.path.join(image_dir, "*.nii.gz")) +
+            glob.glob(os.path.join(image_dir, "*.nii"))
+        )
         data = []
         for img_path in images:
             filename = os.path.basename(img_path)
