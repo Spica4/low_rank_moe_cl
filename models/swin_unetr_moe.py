@@ -129,9 +129,10 @@ class SwinUNETRMoE(nn.Module):
         pretrained_path = self.config.model.pretrained_weights_path
         if pretrained_path:
             weights = torch.load(pretrained_path, map_location="cpu")
-            # MONAI SSL pretrained は {"state_dict": ...} 形式の場合がある
-            if "state_dict" in weights:
-                weights = weights["state_dict"]
+            # MONAI の load_from() は {"state_dict": {"module.xxx": tensor}} 形式を期待する
+            # フラットな state_dict の場合はラップして渡す
+            if "state_dict" not in weights:
+                weights = {"state_dict": weights}
             self.base_model.load_from(weights=weights)
             print(f"[事前学習済み重みをロード] {pretrained_path}")
         else:
