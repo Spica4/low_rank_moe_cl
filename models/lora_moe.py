@@ -82,14 +82,16 @@ class LoRAMoEFFN(nn.Module):
         """
         import math
 
+        device = self.base_wi.weight.device
+
         # Input projection LoRA: A_i [rank, embed_dim], B_i [hidden_dim, rank]
-        A_i = nn.Parameter(torch.empty(self.rank, self.embed_dim))
-        B_i = nn.Parameter(torch.zeros(self.hidden_dim, self.rank))
+        A_i = nn.Parameter(torch.empty(self.rank, self.embed_dim, device=device))
+        B_i = nn.Parameter(torch.zeros(self.hidden_dim, self.rank, device=device))
         nn.init.kaiming_uniform_(A_i, a=math.sqrt(5))
 
         # Output projection LoRA: A_o [rank, hidden_dim], B_o [embed_dim, rank]
-        A_o = nn.Parameter(torch.empty(self.rank, self.hidden_dim))
-        B_o = nn.Parameter(torch.zeros(self.embed_dim, self.rank))
+        A_o = nn.Parameter(torch.empty(self.rank, self.hidden_dim, device=device))
+        B_o = nn.Parameter(torch.zeros(self.embed_dim, self.rank, device=device))
         nn.init.kaiming_uniform_(A_o, a=math.sqrt(5))
 
         self.experts_A_i.append(A_i)
@@ -247,12 +249,14 @@ class LoRAMoEAttention(nn.Module):
         """新しいエキスパートを追加"""
         import math
 
-        A_qkv = nn.Parameter(torch.empty(self.rank, self.embed_dim))
-        B_qkv = nn.Parameter(torch.zeros(self.embed_dim * 3, self.rank))
+        device = self.qkv.weight.device
+
+        A_qkv = nn.Parameter(torch.empty(self.rank, self.embed_dim, device=device))
+        B_qkv = nn.Parameter(torch.zeros(self.embed_dim * 3, self.rank, device=device))
         nn.init.kaiming_uniform_(A_qkv, a=math.sqrt(5))
 
-        A_proj = nn.Parameter(torch.empty(self.rank, self.embed_dim))
-        B_proj = nn.Parameter(torch.zeros(self.embed_dim, self.rank))
+        A_proj = nn.Parameter(torch.empty(self.rank, self.embed_dim, device=device))
+        B_proj = nn.Parameter(torch.zeros(self.embed_dim, self.rank, device=device))
         nn.init.kaiming_uniform_(A_proj, a=math.sqrt(5))
 
         self.experts_A_qkv.append(A_qkv)
