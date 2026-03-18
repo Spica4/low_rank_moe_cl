@@ -51,7 +51,7 @@ class _MoEAttnWrapper(nn.Module):
         # weakref を使い PyTorch のモジュールツリーに循環参照を作らない
         self._model_ref = weakref.ref(model_ref)
 
-    def forward(self, x: torch.Tensor, mask=None) -> tuple:
+    def forward(self, x: torch.Tensor, mask=None) -> torch.Tensor:
         if self.moe_attn.num_experts == 0:
             # エキスパート未追加時はベース重みのみで計算
             B, N, C = x.shape
@@ -65,11 +65,9 @@ class _MoEAttnWrapper(nn.Module):
                 attn = attn + mask
             attn = attn.softmax(dim=-1)
             out = (attn @ v).transpose(1, 2).reshape(B, N, C)
-            out = self.moe_attn.proj(out)
-            return out, None
+            return self.moe_attn.proj(out)
         expert_idx = self._model_ref()._current_expert_idx
-        out = self.moe_attn.forward_single_expert(x, expert_idx, mask=mask)
-        return out, None
+        return self.moe_attn.forward_single_expert(x, expert_idx, mask=mask)
 
 
 class SwinUNETRMoE(nn.Module):
