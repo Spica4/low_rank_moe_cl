@@ -77,16 +77,24 @@ class SwinUNETRMoE(nn.Module):
     def _inject_moe_layers(self):
         """
         Swin Transformer BlockのFFNとAttentionにMoEを挿入
-        
+
         MONAIのSwinUNETRの構造:
-        swinViT.layers[i].blocks[j].mlp  → FFN
-        swinViT.layers[i].blocks[j].attn → Attention
+        swinViT.layers1[j].mlp  → FFN
+        swinViT.layers1[j].attn → Attention
+        (layers1〜layers4 がステージごとに存在)
         """
         swin_vit = self.base_model.swinViT
 
+        all_layer_groups = [
+            swin_vit.layers1,
+            swin_vit.layers2,
+            swin_vit.layers3,
+            swin_vit.layers4,
+        ]
+
         layer_idx = 0
-        for i, layer in enumerate(swin_vit.layers):
-            for j, block in enumerate(layer.blocks):
+        for i, blocks in enumerate(all_layer_groups):
+            for j, block in enumerate(blocks):
                 # FFN (mlp) の MoE化
                 mlp = block.mlp
                 if hasattr(mlp, 'fc1') and hasattr(mlp, 'fc2'):
@@ -235,8 +243,15 @@ class SwinUNETRMoE(nn.Module):
         hidden_states = []
         layer_idx = 0
 
-        for i, layer in enumerate(swin_vit.layers):
-            for j, block in enumerate(layer.blocks):
+        all_layer_groups = [
+            swin_vit.layers1,
+            swin_vit.layers2,
+            swin_vit.layers3,
+            swin_vit.layers4,
+        ]
+
+        for i, blocks in enumerate(all_layer_groups):
+            for j, block in enumerate(blocks):
                 # --- Attention with MoE ---
                 if layer_idx < len(self.moe_attn_layers):
                     moe_attn = self.moe_attn_layers[layer_idx]
@@ -285,9 +300,10 @@ class SwinUNETRMoE(nn.Module):
 
             hidden_states.append(x)
 
-            # Patch Merging (downsample)
-            if hasattr(layer, 'downsample') and layer.downsample is not None:
-                x = layer.downsample(x)
+            # Patch Merging (downsample): MONAIはdownsample1〜3を持つ
+            downsample = getattr(swin_vit, f"downsample{i + 1}", None)
+            if downsample is not None:
+                x = downsample(x)
 
         return hidden_states
 
