@@ -9,20 +9,72 @@ MONAIのSwinUNETRをベースに:
 """
 import torch
 import torch.nn as nn
-from typing import List, Optional, Dict, Tuple
-from copy import deepcopy
+from typing import List, Dict
 
 from .lora_moe import LoRAMoEFFN, LoRAMoEAttention
 from .language_gating import LanguageGuidedGating, CLIPTextEncoder
 
 
+class _MoEFFNWrapper(nn.Module):
+    """
+    SwinTransformerBlock.mlp をMoE FFNに差し替えるラッパー。
+    block.mlp(x) → moe_ffn.forward_single_expert(x, expert_idx)
+    """
+
+    def __init__(self, moe_ffn: LoRAMoEFFN, model_ref: "SwinUNETRMoE"):
+        super().__init__()
+        self.moe_ffn = moe_ffn
+        self._model = model_ref
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.moe_ffn.num_experts == 0:
+            # エキスパート未追加時はベース重みのみで計算
+            h = self.moe_ffn.activation(self.moe_ffn.base_wi(x))
+            return self.moe_ffn.base_wo(h)
+        return self.moe_ffn.forward_single_expert(x, self._model._current_expert_idx)
+
+
+class _MoEAttnWrapper(nn.Module):
+    """
+    SwinTransformerBlock.attn をMoE Attentionに差し替えるラッパー。
+    MONAI の WindowAttention は (out, attn_weights) を返すため同じ I/F に合わせる。
+    入力 x は window-partitioned: (num_windows*B, window_size^3, C)
+    """
+
+    def __init__(self, moe_attn: LoRAMoEAttention, model_ref: "SwinUNETRMoE"):
+        super().__init__()
+        self.moe_attn = moe_attn
+        self._model = model_ref
+
+    def forward(self, x: torch.Tensor, mask=None) -> tuple:
+        if self.moe_attn.num_experts == 0:
+            # エキスパート未追加時はベース重みのみで計算
+            B, N, C = x.shape
+            qkv = self.moe_attn.qkv(x)
+            qkv = qkv.reshape(B, N, 3, self.moe_attn.num_heads, self.moe_attn.head_dim)
+            qkv = qkv.permute(2, 0, 3, 1, 4)
+            q, k, v = qkv.unbind(0)
+            scale = self.moe_attn.head_dim ** -0.5
+            attn = (q @ k.transpose(-2, -1)) * scale
+            if mask is not None:
+                attn = attn + mask
+            attn = attn.softmax(dim=-1)
+            out = (attn @ v).transpose(1, 2).reshape(B, N, C)
+            out = self.moe_attn.proj(out)
+            return out, None
+        out = self.moe_attn.forward_single_expert(
+            x, self._model._current_expert_idx, mask=mask
+        )
+        return out, None
+
+
 class SwinUNETRMoE(nn.Module):
     """
     Swin-UNETR + Low-Rank MoE
-    
+
     MONAIのSwinUNETRをベースに、各Swin Transformer Blockの
     FFNとAttentionにLoRA MoEエキスパートを挿入する。
-    
+
     使い方:
         1. model = SwinUNETRMoE(config) で初期化
         2. model.prepare_step(step=1, text_desc="...", num_classes=14)
@@ -37,6 +89,9 @@ class SwinUNETRMoE(nn.Module):
         self.current_step = 0
         self.text_embeddings: List[torch.Tensor] = []
 
+        # forward時に各ラッパーが参照するエキスパートインデックス
+        self._current_expert_idx: int = 0
+
         # CLIPテキストエンコーダ
         self.clip_encoder = CLIPTextEncoder(config.model.clip_model_name)
 
@@ -50,7 +105,7 @@ class SwinUNETRMoE(nn.Module):
         # 言語ガイドゲーティング
         self.gating_modules: nn.ModuleDict = nn.ModuleDict()
 
-        # MoE挿入位置を特定してモジュールを作成
+        # MoEを作成し、ブロックのmlp/attnを差し替え
         self._inject_moe_layers()
 
     def _build_base_model(self):
@@ -58,14 +113,12 @@ class SwinUNETRMoE(nn.Module):
         try:
             from monai.networks.nets import SwinUNETR
         except ImportError:
-            raise ImportError(
-                "MONAIが必要です: pip install monai"
-            )
+            raise ImportError("MONAIが必要です: pip install monai")
 
         self.base_model = SwinUNETR(
             img_size=self.config.model.img_size,
             in_channels=self.config.model.in_channels,
-            out_channels=self.config.data.step1_num_classes,  # 初期クラス数
+            out_channels=self.config.data.step1_num_classes,
             feature_size=self.config.model.feature_size,
             use_checkpoint=False,
         )
@@ -76,12 +129,8 @@ class SwinUNETRMoE(nn.Module):
 
     def _inject_moe_layers(self):
         """
-        Swin Transformer BlockのFFNとAttentionにMoEを挿入
-
-        MONAIのSwinUNETRの構造:
-        swinViT.layers1[j].mlp  → FFN
-        swinViT.layers1[j].attn → Attention
-        (layers1〜layers4 がステージごとに存在)
+        Swin Transformer BlockのFFNとAttentionにMoEを挿入し、
+        block.mlp / block.attn をラッパーで差し替える。
         """
         swin_vit = self.base_model.swinViT
 
@@ -93,10 +142,10 @@ class SwinUNETRMoE(nn.Module):
         ]
 
         layer_idx = 0
-        for i, block_list in enumerate(all_layer_groups):
+        for block_list in all_layer_groups:
             for basic_layer in block_list:
-                for j, block in enumerate(basic_layer.blocks):
-                    # FFN (mlp) の MoE化
+                for block in basic_layer.blocks:
+                    # --- FFN (mlp) の MoE化 ---
                     mlp = block.mlp
                     if hasattr(mlp, 'fc1') and hasattr(mlp, 'fc2'):
                         embed_dim = mlp.fc1.in_features
@@ -114,14 +163,16 @@ class SwinUNETRMoE(nn.Module):
                         )
                         self.moe_ffn_layers.append(moe_ffn)
 
-                        # ゲーティングモジュール
                         gating = LanguageGuidedGating(
                             embed_dim=embed_dim,
                             clip_embed_dim=self.config.model.clip_embed_dim,
                         )
                         self.gating_modules[f"ffn_{layer_idx}"] = gating
 
-                    # Attention の MoE化
+                        # block.mlp をラッパーで置き換え
+                        block.mlp = _MoEFFNWrapper(moe_ffn, self)
+
+                    # --- Attention の MoE化 ---
                     attn = block.attn
                     if hasattr(attn, 'qkv') and hasattr(attn, 'proj'):
                         embed_dim = attn.proj.in_features
@@ -144,6 +195,9 @@ class SwinUNETRMoE(nn.Module):
                         )
                         self.gating_modules[f"attn_{layer_idx}"] = gating_attn
 
+                        # block.attn をラッパーで置き換え
+                        block.attn = _MoEAttnWrapper(moe_attn, self)
+
                     layer_idx += 1
 
         print(f"[MoE挿入完了] FFN: {len(self.moe_ffn_layers)}層, "
@@ -158,12 +212,12 @@ class SwinUNETRMoE(nn.Module):
     ):
         """
         新しい学習ステップの準備
-        
+
         1. 前ステップのエキスパートを凍結
         2. 新しいエキスパートを追加
         3. テキストembeddingを生成
         4. セグメンテーションヘッドを更新
-        
+
         Args:
             step: ステップ番号（1から開始）
             text_description: データセットのテキスト記述
@@ -190,141 +244,30 @@ class SwinUNETRMoE(nn.Module):
         text_emb = self.clip_encoder.encode(text_description, device=device)
         self.text_embeddings.append(text_emb)
 
-        # セグメンテーションヘッドを更新（クラス数が変わる場合）
-        self._update_seg_head(num_classes)
+        # セグメンテーションヘッドを更新
+        self._update_seg_head(num_classes, device)
 
         self.current_step = step
         print(f"[Step {step} 準備完了] エキスパート数: {step}, クラス数: {num_classes}")
 
-    def _update_seg_head(self, num_classes: int):
-        """セグメンテーションヘッドのクラス数を更新"""
-        # SwinUNETRの最終出力層を差し替え
+    def _update_seg_head(self, num_classes: int, device: str = "cuda"):
+        """base_model.out を新しいクラス数のConvに差し替える"""
         old_out = self.base_model.out
         if hasattr(old_out, 'conv') and hasattr(old_out.conv, 'conv'):
             in_channels = old_out.conv.conv.in_channels
         else:
-            # MONAI版に応じて適宜調整
             in_channels = self.config.model.feature_size
 
-        self.seg_head = nn.Conv3d(
-            in_channels=in_channels,
-            out_channels=num_classes,
-            kernel_size=1,
-        )
-        # セグメンテーションヘッドは学習可能
-        for param in self.seg_head.parameters():
+        new_out = nn.Conv3d(in_channels=in_channels, out_channels=num_classes, kernel_size=1)
+        new_out = new_out.to(device)
+        for param in new_out.parameters():
             param.requires_grad = True
 
-    def _forward_with_moe(
-        self,
-        x: torch.Tensor,
-        expert_idx: int = None,
-        use_routing: bool = False,
-    ) -> torch.Tensor:
-        """
-        MoEを組み込んだフォワードパス
-        
-        Swin-UNETRのエンコーダ部分を通しながら、
-        各ブロックでMoE FFN/Attentionを適用
-        
-        Args:
-            x: [batch, C, H, W, D] 入力ボリューム
-            expert_idx: 学習時に使用するエキスパートインデックス
-            use_routing: テスト時のルーティングを使うかどうか
-        """
-        swin_vit = self.base_model.swinViT
+        self.base_model.out = new_out
 
-        # SwinViTのパッチ埋め込み
-        if hasattr(swin_vit, 'patch_embed'):
-            x = swin_vit.patch_embed(x)
-        elif hasattr(swin_vit, 'patch_embedding'):
-            x = swin_vit.patch_embedding(x)
-
-        # 各Swin Transformer Layerを通過
-        hidden_states = []
-        layer_idx = 0
-
-        all_layer_groups = [
-            swin_vit.layers1,
-            swin_vit.layers2,
-            swin_vit.layers3,
-            swin_vit.layers4,
-        ]
-
-        for i, block_list in enumerate(all_layer_groups):
-            for basic_layer in block_list:
-                for j, block in enumerate(basic_layer.blocks):
-                    # --- Attention with MoE ---
-                    if layer_idx < len(self.moe_attn_layers):
-                        moe_attn = self.moe_attn_layers[layer_idx]
-
-                        if use_routing and len(self.text_embeddings) > 1:
-                            # テスト時: ルーティング
-                            gating = self.gating_modules[f"attn_{layer_idx}"]
-                            routing_weights, expert_indices = gating.forward_test(
-                                x, self.text_embeddings
-                            )
-                            # 各トークンをTop-1エキスパートで処理
-                            attn_out = self._route_attention(
-                                moe_attn, x, expert_indices
-                            )
-                        else:
-                            # 学習時: 指定エキスパートのみ
-                            idx = expert_idx if expert_idx is not None else self.current_step - 1
-                            if moe_attn.num_experts > 0:
-                                attn_out = moe_attn.forward_single_expert(x, idx)
-                            else:
-                                attn_out = x
-
-                        # Residual connection (Swin Transformer style)
-                        x = x + attn_out
-
-                    # --- FFN with MoE ---
-                    if layer_idx < len(self.moe_ffn_layers):
-                        moe_ffn = self.moe_ffn_layers[layer_idx]
-
-                        if use_routing and len(self.text_embeddings) > 1:
-                            gating = self.gating_modules[f"ffn_{layer_idx}"]
-                            routing_weights, expert_indices = gating.forward_test(
-                                x, self.text_embeddings
-                            )
-                            ffn_out = moe_ffn.forward_routed(x, routing_weights)
-                        else:
-                            idx = expert_idx if expert_idx is not None else self.current_step - 1
-                            if moe_ffn.num_experts > 0:
-                                ffn_out = moe_ffn.forward_single_expert(x, idx)
-                            else:
-                                ffn_out = x
-
-                        x = x + ffn_out
-
-                    layer_idx += 1
-
-            hidden_states.append(x)
-
-            # Patch Merging (downsample): MONAIはdownsample1〜3を持つ
-            downsample = getattr(swin_vit, f"downsample{i + 1}", None)
-            if downsample is not None:
-                x = downsample(x)
-
-        return hidden_states
-
-    def _route_attention(
-        self,
-        moe_attn: LoRAMoEAttention,
-        x: torch.Tensor,
-        expert_indices: torch.Tensor,
-    ) -> torch.Tensor:
-        """Top-1ルーティングでAttention出力を計算"""
-        output = torch.zeros_like(x)
-        for expert_idx in range(moe_attn.num_experts):
-            mask = (expert_indices == expert_idx)
-            if not mask.any():
-                continue
-            expert_out = moe_attn.forward_single_expert(x, expert_idx)
-            mask_expanded = mask.unsqueeze(-1).expand_as(output)
-            output = output + expert_out * mask_expanded.float()
-        return output
+    @property
+    def seg_head(self) -> nn.Module:
+        return self.base_model.out
 
     def forward(
         self,
@@ -333,87 +276,28 @@ class SwinUNETRMoE(nn.Module):
     ) -> torch.Tensor:
         """
         フォワードパス
-        
+
+        block.mlp / block.attn はすでにMoEラッパーに差し替え済みなので、
+        self.base_model(x) をそのまま呼ぶだけでMoEが適用される。
+
         Args:
             x: [batch, C, H, W, D] 入力
             training_step: 学習時は現在のステップ番号、テスト時はNone
-            
+
         Returns:
             logits: [batch, num_classes, H, W, D]
         """
-        use_routing = (training_step is None)
-
         if training_step is not None:
-            expert_idx = training_step - 1
+            self._current_expert_idx = training_step - 1
         else:
-            expert_idx = None
+            self._current_expert_idx = self.current_step - 1
 
-        # SwinViTエンコーダ（MoE付き）
-        hidden_states = self._forward_with_moe(
-            x, expert_idx=expert_idx, use_routing=use_routing
-        )
-
-        # デコーダ（UNETRデコーダ部分）
-        # 注: ここはSwinUNETRのデコーダをそのまま使用
-        # 実際の実装ではMONAIのデコーダ構造に合わせて調整が必要
-        logits = self._decode(hidden_states, x)
-
-        return logits
-
-    def _decode(
-        self,
-        hidden_states: List[torch.Tensor],
-        original_input: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        UNETRスタイルのデコーダ
-        
-        hidden_statesをスキップ接続としてデコーダに渡す。
-        実際の実装ではMONAIのSwinUNETRデコーダ構造に合わせる。
-        """
-        # 簡易実装: 最終隠れ状態を使用
-        # 本番ではbase_modelのデコーダ部分を活用
-        dec = self.base_model
-        
-        # MONAIのSwinUNETRのデコーダ呼び出し
-        # (実装はMONAIのバージョンに依存するため、適宜調整)
-        if len(hidden_states) >= 4:
-            enc0 = hidden_states[0]
-            enc1 = hidden_states[1]
-            enc2 = hidden_states[2]
-            enc3 = hidden_states[3]
-
-            # デコーダパス（SwinUNETRのデコーダ構造に従う）
-            # ここは概略的な実装 - 実際のMONAI APIに合わせて調整
-            try:
-                dec0 = dec.decoder5(enc3, None)  
-                dec1 = dec.decoder4(dec0, enc2)
-                dec2 = dec.decoder3(dec1, enc1)
-                dec3 = dec.decoder2(dec2, enc0)
-                logits = self.seg_head(dec3)
-            except (AttributeError, TypeError):
-                # フォールバック: ベースモデルの出力層を使用
-                final_feat = hidden_states[-1]
-                # reshape and upsample
-                B = original_input.shape[0]
-                logits = self.seg_head(
-                    final_feat.permute(0, 2, 1).reshape(
-                        B, -1, *[s // 32 for s in self.config.model.img_size]
-                    )
-                )
-                logits = nn.functional.interpolate(
-                    logits, size=original_input.shape[2:], mode='trilinear'
-                )
-        else:
-            raise ValueError(f"hidden_statesが不足: {len(hidden_states)}")
-
-        return logits
+        return self.base_model(x)
 
     def get_trainable_params(self) -> List[nn.Parameter]:
         """現在のステップで学習可能なパラメータを返す"""
         params = []
 
-        # 現在のエキスパートのLoRAパラメータ
         expert_idx = self.current_step - 1
         for moe_ffn in self.moe_ffn_layers:
             if expert_idx < moe_ffn.num_experts:
@@ -432,11 +316,9 @@ class SwinUNETRMoE(nn.Module):
                     moe_attn.experts_B_proj[expert_idx],
                 ])
 
-        # ゲーティングモジュール
         for gating in self.gating_modules.values():
             params.extend(gating.parameters())
 
-        # セグメンテーションヘッド
         params.extend(self.seg_head.parameters())
 
         return params
@@ -457,7 +339,7 @@ class SwinUNETRMoE(nn.Module):
                     counts["lora_experts"] += param.numel()
                 elif "gating" in name:
                     counts["gating"] += param.numel()
-                elif "seg_head" in name:
+                elif "seg_head" in name or "base_model.out" in name:
                     counts["seg_head"] += param.numel()
                 counts["total_trainable"] += param.numel()
             else:
