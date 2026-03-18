@@ -27,6 +27,11 @@ class ModelConfig:
     clip_model_name: str = "openai/clip-vit-base-patch32"
     clip_embed_dim: int = 512              # CLIPテキストembedding次元
 
+    # 事前学習済み重みパス（Swin-UNETR SSL pretrained）
+    # ダウンロード: https://github.com/Project-MONAI/MONAI-extra-test-data/releases
+    # 例: model_swinvit.pt
+    pretrained_weights_path: str = ""     # 空文字列の場合はスクラッチ学習
+
 
 @dataclass
 class TrainConfig:

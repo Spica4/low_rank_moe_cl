@@ -125,6 +125,19 @@ class SwinUNETRMoE(nn.Module):
             use_checkpoint=False,
         )
 
+        # 事前学習済み重みのロード
+        pretrained_path = self.config.model.pretrained_weights_path
+        if pretrained_path:
+            weights = torch.load(pretrained_path, map_location="cpu")
+            # MONAI SSL pretrained は {"state_dict": ...} 形式の場合がある
+            if "state_dict" in weights:
+                weights = weights["state_dict"]
+            self.base_model.load_from(weights=weights)
+            print(f"[事前学習済み重みをロード] {pretrained_path}")
+        else:
+            print("[警告] 事前学習済み重みが指定されていません。スクラッチ学習を行います。")
+            print("  config.model.pretrained_weights_path にパスを設定することを推奨します。")
+
         # ベースモデルのパラメータを凍結
         for param in self.base_model.parameters():
             param.requires_grad = False
