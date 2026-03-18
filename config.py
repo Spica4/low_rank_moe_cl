@@ -30,7 +30,7 @@ class ModelConfig:
     # 事前学習済み重みパス（Swin-UNETR SSL pretrained）
     # ダウンロード: https://github.com/Project-MONAI/MONAI-extra-test-data/releases
     # 例: model_swinvit.pt
-    pretrained_weights_path: str = ""     # 空文字列の場合はスクラッチ学習
+    pretrained_weights_path: str = "/deeparea/sokabe/weight/model_swinvit.pt"     # 空文字列の場合はスクラッチ学習
 
 
 @dataclass
