@@ -94,56 +94,57 @@ class SwinUNETRMoE(nn.Module):
 
         layer_idx = 0
         for i, block_list in enumerate(all_layer_groups):
-            for j, block in enumerate(block_list):
-                # FFN (mlp) の MoE化
-                mlp = block.mlp
-                if hasattr(mlp, 'fc1') and hasattr(mlp, 'fc2'):
-                    embed_dim = mlp.fc1.in_features
-                    hidden_dim = mlp.fc1.out_features
+            for basic_layer in block_list:
+                for j, block in enumerate(basic_layer.blocks):
+                    # FFN (mlp) の MoE化
+                    mlp = block.mlp
+                    if hasattr(mlp, 'fc1') and hasattr(mlp, 'fc2'):
+                        embed_dim = mlp.fc1.in_features
+                        hidden_dim = mlp.fc1.out_features
 
-                    moe_ffn = LoRAMoEFFN(
-                        embed_dim=embed_dim,
-                        hidden_dim=hidden_dim,
-                        rank=self.config.model.lora_rank,
-                        alpha=self.config.model.lora_alpha,
-                        pretrained_wi=mlp.fc1.weight.data.clone(),
-                        pretrained_wo=mlp.fc2.weight.data.clone(),
-                        pretrained_bi=mlp.fc1.bias.data.clone() if mlp.fc1.bias is not None else None,
-                        pretrained_bo=mlp.fc2.bias.data.clone() if mlp.fc2.bias is not None else None,
-                    )
-                    self.moe_ffn_layers.append(moe_ffn)
+                        moe_ffn = LoRAMoEFFN(
+                            embed_dim=embed_dim,
+                            hidden_dim=hidden_dim,
+                            rank=self.config.model.lora_rank,
+                            alpha=self.config.model.lora_alpha,
+                            pretrained_wi=mlp.fc1.weight.data.clone(),
+                            pretrained_wo=mlp.fc2.weight.data.clone(),
+                            pretrained_bi=mlp.fc1.bias.data.clone() if mlp.fc1.bias is not None else None,
+                            pretrained_bo=mlp.fc2.bias.data.clone() if mlp.fc2.bias is not None else None,
+                        )
+                        self.moe_ffn_layers.append(moe_ffn)
 
-                    # ゲーティングモジュール
-                    gating = LanguageGuidedGating(
-                        embed_dim=embed_dim,
-                        clip_embed_dim=self.config.model.clip_embed_dim,
-                    )
-                    self.gating_modules[f"ffn_{layer_idx}"] = gating
+                        # ゲーティングモジュール
+                        gating = LanguageGuidedGating(
+                            embed_dim=embed_dim,
+                            clip_embed_dim=self.config.model.clip_embed_dim,
+                        )
+                        self.gating_modules[f"ffn_{layer_idx}"] = gating
 
-                # Attention の MoE化
-                attn = block.attn
-                if hasattr(attn, 'qkv') and hasattr(attn, 'proj'):
-                    embed_dim = attn.proj.in_features
+                    # Attention の MoE化
+                    attn = block.attn
+                    if hasattr(attn, 'qkv') and hasattr(attn, 'proj'):
+                        embed_dim = attn.proj.in_features
 
-                    moe_attn = LoRAMoEAttention(
-                        embed_dim=embed_dim,
-                        num_heads=attn.num_heads if hasattr(attn, 'num_heads') else 8,
-                        rank=self.config.model.lora_rank,
-                        alpha=self.config.model.lora_alpha,
-                        pretrained_qkv_weight=attn.qkv.weight.data.clone(),
-                        pretrained_proj_weight=attn.proj.weight.data.clone(),
-                        pretrained_qkv_bias=attn.qkv.bias.data.clone() if attn.qkv.bias is not None else None,
-                        pretrained_proj_bias=attn.proj.bias.data.clone() if attn.proj.bias is not None else None,
-                    )
-                    self.moe_attn_layers.append(moe_attn)
+                        moe_attn = LoRAMoEAttention(
+                            embed_dim=embed_dim,
+                            num_heads=attn.num_heads if hasattr(attn, 'num_heads') else 8,
+                            rank=self.config.model.lora_rank,
+                            alpha=self.config.model.lora_alpha,
+                            pretrained_qkv_weight=attn.qkv.weight.data.clone(),
+                            pretrained_proj_weight=attn.proj.weight.data.clone(),
+                            pretrained_qkv_bias=attn.qkv.bias.data.clone() if attn.qkv.bias is not None else None,
+                            pretrained_proj_bias=attn.proj.bias.data.clone() if attn.proj.bias is not None else None,
+                        )
+                        self.moe_attn_layers.append(moe_attn)
 
-                    gating_attn = LanguageGuidedGating(
-                        embed_dim=embed_dim,
-                        clip_embed_dim=self.config.model.clip_embed_dim,
-                    )
-                    self.gating_modules[f"attn_{layer_idx}"] = gating_attn
+                        gating_attn = LanguageGuidedGating(
+                            embed_dim=embed_dim,
+                            clip_embed_dim=self.config.model.clip_embed_dim,
+                        )
+                        self.gating_modules[f"attn_{layer_idx}"] = gating_attn
 
-                layer_idx += 1
+                    layer_idx += 1
 
         print(f"[MoE挿入完了] FFN: {len(self.moe_ffn_layers)}層, "
               f"Attention: {len(self.moe_attn_layers)}層")
@@ -251,52 +252,53 @@ class SwinUNETRMoE(nn.Module):
         ]
 
         for i, block_list in enumerate(all_layer_groups):
-            for j, block in enumerate(block_list):
-                # --- Attention with MoE ---
-                if layer_idx < len(self.moe_attn_layers):
-                    moe_attn = self.moe_attn_layers[layer_idx]
+            for basic_layer in block_list:
+                for j, block in enumerate(basic_layer.blocks):
+                    # --- Attention with MoE ---
+                    if layer_idx < len(self.moe_attn_layers):
+                        moe_attn = self.moe_attn_layers[layer_idx]
 
-                    if use_routing and len(self.text_embeddings) > 1:
-                        # テスト時: ルーティング
-                        gating = self.gating_modules[f"attn_{layer_idx}"]
-                        routing_weights, expert_indices = gating.forward_test(
-                            x, self.text_embeddings
-                        )
-                        # 各トークンをTop-1エキスパートで処理
-                        attn_out = self._route_attention(
-                            moe_attn, x, expert_indices
-                        )
-                    else:
-                        # 学習時: 指定エキスパートのみ
-                        idx = expert_idx if expert_idx is not None else self.current_step - 1
-                        if moe_attn.num_experts > 0:
-                            attn_out = moe_attn.forward_single_expert(x, idx)
+                        if use_routing and len(self.text_embeddings) > 1:
+                            # テスト時: ルーティング
+                            gating = self.gating_modules[f"attn_{layer_idx}"]
+                            routing_weights, expert_indices = gating.forward_test(
+                                x, self.text_embeddings
+                            )
+                            # 各トークンをTop-1エキスパートで処理
+                            attn_out = self._route_attention(
+                                moe_attn, x, expert_indices
+                            )
                         else:
-                            attn_out = x
+                            # 学習時: 指定エキスパートのみ
+                            idx = expert_idx if expert_idx is not None else self.current_step - 1
+                            if moe_attn.num_experts > 0:
+                                attn_out = moe_attn.forward_single_expert(x, idx)
+                            else:
+                                attn_out = x
 
-                    # Residual connection (Swin Transformer style)
-                    x = x + attn_out
+                        # Residual connection (Swin Transformer style)
+                        x = x + attn_out
 
-                # --- FFN with MoE ---
-                if layer_idx < len(self.moe_ffn_layers):
-                    moe_ffn = self.moe_ffn_layers[layer_idx]
+                    # --- FFN with MoE ---
+                    if layer_idx < len(self.moe_ffn_layers):
+                        moe_ffn = self.moe_ffn_layers[layer_idx]
 
-                    if use_routing and len(self.text_embeddings) > 1:
-                        gating = self.gating_modules[f"ffn_{layer_idx}"]
-                        routing_weights, expert_indices = gating.forward_test(
-                            x, self.text_embeddings
-                        )
-                        ffn_out = moe_ffn.forward_routed(x, routing_weights)
-                    else:
-                        idx = expert_idx if expert_idx is not None else self.current_step - 1
-                        if moe_ffn.num_experts > 0:
-                            ffn_out = moe_ffn.forward_single_expert(x, idx)
+                        if use_routing and len(self.text_embeddings) > 1:
+                            gating = self.gating_modules[f"ffn_{layer_idx}"]
+                            routing_weights, expert_indices = gating.forward_test(
+                                x, self.text_embeddings
+                            )
+                            ffn_out = moe_ffn.forward_routed(x, routing_weights)
                         else:
-                            ffn_out = x
+                            idx = expert_idx if expert_idx is not None else self.current_step - 1
+                            if moe_ffn.num_experts > 0:
+                                ffn_out = moe_ffn.forward_single_expert(x, idx)
+                            else:
+                                ffn_out = x
 
-                    x = x + ffn_out
+                        x = x + ffn_out
 
-                layer_idx += 1
+                    layer_idx += 1
 
             hidden_states.append(x)
 
