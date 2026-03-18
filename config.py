@@ -35,13 +35,13 @@ class TrainConfig:
     step1_epochs: int = 500
     step1_lr: float = 1e-3
     step1_weight_decay: float = 1e-5
-    step1_batch_size: int = 3
+    step1_batch_size: int = 1
 
     # Step2 (例: LiTS)
     step2_epochs: int = 200
     step2_lr: float = 1e-3
     step2_weight_decay: float = 1e-5
-    step2_batch_size: int = 3
+    step2_batch_size: int = 1
 
     # 共通
     warmup_epochs: int = 10
