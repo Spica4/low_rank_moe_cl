@@ -19,6 +19,8 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from torch.cuda.amp import GradScaler, autocast
 
+from monai.inferers import sliding_window_inference
+
 from config import Config, ModelConfig, TrainConfig, DataConfig
 from models.swin_unetr_moe import SwinUNETRMoE
 from data.dataset import get_dataloader
@@ -126,7 +128,13 @@ def validate(
         images = batch_data["image"].to(device)
         labels = batch_data["label"].to(device)
 
-        logits = model(images, training_step=None)  # テスト時はルーティング使用
+        logits = sliding_window_inference(
+            inputs=images,
+            roi_size=(96, 96, 96),
+            sw_batch_size=1,
+            predictor=lambda x: model(x, training_step=None),
+            overlap=0.5,
+        )
         dice = dice_score(logits, labels, num_classes=num_classes)
 
         for key, value in dice.items():
