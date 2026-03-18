@@ -93,8 +93,8 @@ class SwinUNETRMoE(nn.Module):
         ]
 
         layer_idx = 0
-        for i, basic_layer in enumerate(all_layer_groups):
-            for j, block in enumerate(basic_layer.blocks):
+        for i, block_list in enumerate(all_layer_groups):
+            for j, block in enumerate(block_list):
                 # FFN (mlp) の MoE化
                 mlp = block.mlp
                 if hasattr(mlp, 'fc1') and hasattr(mlp, 'fc2'):
@@ -250,8 +250,8 @@ class SwinUNETRMoE(nn.Module):
             swin_vit.layers4,
         ]
 
-        for i, basic_layer in enumerate(all_layer_groups):
-            for j, block in enumerate(basic_layer.blocks):
+        for i, block_list in enumerate(all_layer_groups):
+            for j, block in enumerate(block_list):
                 # --- Attention with MoE ---
                 if layer_idx < len(self.moe_attn_layers):
                     moe_attn = self.moe_attn_layers[layer_idx]
@@ -300,9 +300,10 @@ class SwinUNETRMoE(nn.Module):
 
             hidden_states.append(x)
 
-            # Patch Merging (downsample)
-            if hasattr(basic_layer, 'downsample') and basic_layer.downsample is not None:
-                x = basic_layer.downsample(x)
+            # Patch Merging (downsample): MONAIはdownsample1〜3を持つ
+            downsample = getattr(swin_vit, f"downsample{i + 1}", None)
+            if downsample is not None:
+                x = downsample(x)
 
         return hidden_states
 
