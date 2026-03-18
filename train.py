@@ -78,6 +78,12 @@ def train_one_epoch(
     num_batches = 0
 
     for batch_data in dataloader:
+        # RandCropByPosNegLabeld(num_samples>1) は list[dict] を返す場合がある
+        if isinstance(batch_data, list):
+            batch_data = {
+                k: torch.cat([d[k] for d in batch_data], dim=0)
+                for k in batch_data[0].keys()
+            }
         images = batch_data["image"].to(device)
         labels = batch_data["label"].to(device)
 
