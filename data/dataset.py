@@ -97,14 +97,31 @@ class GenericMedicalDataset(Dataset):
             glob.glob(os.path.join(image_dir, "*.nii"))
         )
 
+        labels = sorted(
+            glob.glob(os.path.join(label_dir, "*.nii.gz")) +
+            glob.glob(os.path.join(label_dir, "*.nii"))
+        )
+
         print(f"[データセットスキャン] {len(images)} 画像が見つかりました: {image_dir}")
+        print(f"[データセットスキャン] {len(labels)} ラベルが見つかりました: {label_dir}")
 
         data = []
-        for img_path in images:
-            filename = os.path.basename(img_path)
-            label_path = os.path.join(label_dir, filename)
+        # for img_path in images:
+        #     filename = os.path.basename(img_path)
+        #     label_path = os.path.join(label_dir, filename)
+        #     if os.path.exists(label_path):
+        #         data.append({"image": img_path, "label": label_path})
+
+        for i in range(len(images)):
+            img_path = images[i]
+            label_path = labels[i] if i < len(labels) else None
             if os.path.exists(label_path):
                 data.append({"image": img_path, "label": label_path})
+            else:
+                print(f"[警告] 対応するラベルが見つかりません: {label_path}")
+        
+        print(f"[データセットスキャン] {len(data)} ペアが見つかりました: {label_dir}")
+
         return data
 
     def __len__(self):
