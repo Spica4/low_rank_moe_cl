@@ -181,31 +181,42 @@ def get_val_transforms(spatial_size: Tuple[int, ...] = (96, 96, 96)):
 
 
 def get_dataloader(
-    data_dir: str = None,
-    data_list: List[Dict[str, str]] = None,
-    spatial_size: Tuple[int, ...] = (96, 96, 96),
-    batch_size: int = 3,
-    num_workers: int = 4,
+    config,
+    step: int,
     is_train: bool = True,
     use_cache: bool = True,
 ) -> DataLoader:
     """
-    データローダーを取得
-    
+    Config と step 番号からデータローダーを取得
+
     使用例:
-        # ディレクトリから自動検出
-        loader = get_dataloader(data_dir="/path/to/data", batch_size=3)
-        
-        # ファイルリストを直接指定
-        data_list = [
-            {"image": "/path/img1.nii.gz", "label": "/path/lbl1.nii.gz"},
-            {"image": "/path/img2.nii.gz", "label": "/path/lbl2.nii.gz"},
-        ]
-        loader = get_dataloader(data_list=data_list, batch_size=3)
+        train_loader = get_dataloader(config, step=1, is_train=True)
+        val_loader   = get_dataloader(config, step=1, is_train=False)
     """
+    data_cfg = config.data
+    train_cfg = config.train
+
+    if step == 1:
+        data_dir   = data_cfg.step1_train_dir if is_train else data_cfg.step1_val_dir
+        batch_size = train_cfg.step1_batch_size if is_train else 1
+    elif step == 2:
+        data_dir   = data_cfg.step2_train_dir if is_train else data_cfg.step2_val_dir
+        batch_size = train_cfg.step2_batch_size if is_train else 1
+    else:
+        raise ValueError(f"未対応のステップ: {step}")
+
+    spatial_size = tuple(data_cfg.spatial_size)
+    num_workers  = data_cfg.num_workers
+
     transforms = get_train_transforms(spatial_size) if is_train else get_val_transforms(spatial_size)
 
-    if MONAI_AVAILABLE and use_cache and data_list is not None:
+    if MONAI_AVAILABLE and use_cache:
+        data_list = GenericMedicalDataset(data_dir=data_dir)._scan_directory(data_dir)
+        if len(data_list) == 0:
+            raise ValueError(
+                f"データが見つかりませんでした: {data_dir}\n"
+                f"config.data.step{step}_{'train' if is_train else 'val'}_dir を確認してください。"
+            )
         dataset = CacheDataset(
             data=data_list,
             transform=transforms,
@@ -213,11 +224,12 @@ def get_dataloader(
             num_workers=num_workers,
         )
     else:
-        dataset = GenericMedicalDataset(
-            data_dir=data_dir,
-            data_list=data_list,
-            transform=transforms,
-        )
+        dataset = GenericMedicalDataset(data_dir=data_dir, transform=transforms)
+        if len(dataset) == 0:
+            raise ValueError(
+                f"データが見つかりませんでした: {data_dir}\n"
+                f"config.data.step{step}_{'train' if is_train else 'val'}_dir を確認してください。"
+            )
 
     loader = DataLoader(
         dataset,

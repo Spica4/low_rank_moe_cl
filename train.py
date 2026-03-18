@@ -167,9 +167,6 @@ def train_step(
         epochs = config.train.step1_epochs
         lr = config.train.step1_lr
         wd = config.train.step1_weight_decay
-        batch_size = config.train.step1_batch_size
-        train_dir = config.data.step1_train_dir
-        val_dir = config.data.step1_val_dir
     elif step == 2:
         # Step1の準備も先にやっておく（エキスパート1を追加してから凍結するため）
         if model.current_step == 0:
@@ -184,9 +181,6 @@ def train_step(
         epochs = config.train.step2_epochs
         lr = config.train.step2_lr
         wd = config.train.step2_weight_decay
-        batch_size = config.train.step2_batch_size
-        train_dir = config.data.step2_train_dir
-        val_dir = config.data.step2_val_dir
     else:
         raise ValueError(f"未対応のステップ: {step}")
 
@@ -205,20 +199,8 @@ def train_step(
         print(f"  {key}: {count:,} ({count/1e6:.2f}M)")
 
     # --- データローダー ---
-    train_loader = get_dataloader(
-        data_dir=train_dir,
-        batch_size=batch_size,
-        num_workers=config.data.num_workers,
-        spatial_size=config.data.spatial_size,
-        is_train=True,
-    )
-    val_loader = get_dataloader(
-        data_dir=val_dir,
-        batch_size=1,
-        num_workers=config.data.num_workers,
-        spatial_size=config.data.spatial_size,
-        is_train=False,
-    )
+    train_loader = get_dataloader(config, step=step, is_train=True)
+    val_loader   = get_dataloader(config, step=step, is_train=False)
 
     # --- 最適化 ---
     trainable_params = model.get_trainable_params()
