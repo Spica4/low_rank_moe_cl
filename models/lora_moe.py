@@ -322,7 +322,12 @@ class LoRAMoEAttention(nn.Module):
         scale = self.head_dim ** -0.5
         attn = (q @ k.transpose(-2, -1)) * scale
         if mask is not None:
-            attn = attn + mask
+            # MONAI shifted-window mask: (nW, N, N)
+            # attn: (B*nW, num_heads, N, N) → reshape して加算
+            nW = mask.shape[0]
+            attn = attn.view(B // nW, nW, self.num_heads, N, N)
+            attn = attn + mask.unsqueeze(1).unsqueeze(0)
+            attn = attn.view(-1, self.num_heads, N, N)
         attn = attn.softmax(dim=-1)
 
         out = (attn @ v).transpose(1, 2).reshape(B, N, C)
