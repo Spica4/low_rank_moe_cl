@@ -149,19 +149,22 @@ class SwinUNETRMoE(nn.Module):
                 for block in basic_layer.blocks:
                     # --- FFN (mlp) の MoE化 ---
                     mlp = block.mlp
-                    if hasattr(mlp, 'fc1') and hasattr(mlp, 'fc2'):
-                        embed_dim = mlp.fc1.in_features
-                        hidden_dim = mlp.fc1.out_features
+                    # MONAI MLPBlock は linear1/linear2 を使用 (fc1/fc2 ではない)
+                    _fc1 = getattr(mlp, 'linear1', None) or getattr(mlp, 'fc1', None)
+                    _fc2 = getattr(mlp, 'linear2', None) or getattr(mlp, 'fc2', None)
+                    if _fc1 is not None and _fc2 is not None:
+                        embed_dim = _fc1.in_features
+                        hidden_dim = _fc1.out_features
 
                         moe_ffn = LoRAMoEFFN(
                             embed_dim=embed_dim,
                             hidden_dim=hidden_dim,
                             rank=self.config.model.lora_rank,
                             alpha=self.config.model.lora_alpha,
-                            pretrained_wi=mlp.fc1.weight.data.clone(),
-                            pretrained_wo=mlp.fc2.weight.data.clone(),
-                            pretrained_bi=mlp.fc1.bias.data.clone() if mlp.fc1.bias is not None else None,
-                            pretrained_bo=mlp.fc2.bias.data.clone() if mlp.fc2.bias is not None else None,
+                            pretrained_wi=_fc1.weight.data.clone(),
+                            pretrained_wo=_fc2.weight.data.clone(),
+                            pretrained_bi=_fc1.bias.data.clone() if _fc1.bias is not None else None,
+                            pretrained_bo=_fc2.bias.data.clone() if _fc2.bias is not None else None,
                         )
                         self.moe_ffn_layers.append(moe_ffn)
 
