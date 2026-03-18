@@ -135,15 +135,22 @@ def validate(
             predictor=lambda x: model(x, training_step=None),
             overlap=0.5,
         )
-        dice = dice_score(logits, labels, num_classes=num_classes)
 
-        for key, value in dice.items():
-            if key not in all_dice:
-                all_dice[key] = []
-            all_dice[key].append(value)
+        # 1症例ずつ Dice を計算（バッチ内で混ぜると empty class 判定がずれるため）
+        batch_size = images.shape[0]
+        for i in range(batch_size):
+            dice = dice_score(
+                logits[i : i + 1], labels[i : i + 1], num_classes=num_classes
+            )
+            for key, value in dice.items():
+                if value != value:  # NaN をスキップ（GT にも予測にも存在しないクラス）
+                    continue
+                if key not in all_dice:
+                    all_dice[key] = []
+                all_dice[key].append(value)
 
-    # 平均
-    avg_dice = {k: sum(v) / len(v) for k, v in all_dice.items()}
+    # 平均（有効値のみ）
+    avg_dice = {k: sum(v) / len(v) for k, v in all_dice.items() if v}
     return avg_dice
 
 

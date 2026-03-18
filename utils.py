@@ -52,6 +52,12 @@ def dice_score(
         pred_c = (pred == c).float()
         target_c = (target == c).float()
 
+        # GT にも予測にも存在しないクラスは NaN とし、平均から除外する
+        # (smooth で 1.0 になる誤カウントを防ぐ)
+        if target_c.sum() == 0 and pred_c.sum() == 0:
+            dice_dict[f"class_{c}"] = float("nan")
+            continue
+
         intersection = (pred_c * target_c).sum()
         union = pred_c.sum() + target_c.sum()
 
