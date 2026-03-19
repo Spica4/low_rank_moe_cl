@@ -42,7 +42,7 @@ class ModelConfig:
     #     → class_6(肝臓)のみしか学習できない問題が発生する可能性あり
     #
     # 空文字列の場合はスクラッチ学習
-    pretrained_weights_path: str = "/deeparea/sokabe/weight/model_swinvit.pt"
+    pretrained_weights_path: str = "/deeparea/sokabe/weight/totalseg_pretrained.pth"
 
 
 @dataclass
