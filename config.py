@@ -27,10 +27,22 @@ class ModelConfig:
     clip_model_name: str = "openai/clip-vit-base-patch32"
     clip_embed_dim: int = 512              # CLIPテキストembedding次元
 
-    # 事前学習済み重みパス（Swin-UNETR SSL pretrained）
-    # ダウンロード: https://github.com/Project-MONAI/MONAI-extra-test-data/releases
-    # 例: model_swinvit.pt
-    pretrained_weights_path: str = "/deeparea/sokabe/weight/model_swinvit.pt"     # 空文字列の場合はスクラッチ学習
+    # 事前学習済み重みパス
+    # 以下の2形式に対応（自動判別）:
+    #
+    # (A) フルSwinUNETRチェックポイント（推奨）:
+    #     SwinViT + encoder/decoderブロックの重みを含む。
+    #     例: セグメンテーション学習済みの .pth / .pt ファイル
+    #     → 全層に事前学習済み重みがロードされ、凍結後もクラス識別性を維持
+    #
+    # (B) SwinViTのみのチェックポイント:
+    #     SSL事前学習済みのSwinViTエンコーダ重みのみ。
+    #     例: model_swinvit.pt（MONAI提供）
+    #     → encoder/decoderブロックはランダム初期化のまま凍結される
+    #     → class_6(肝臓)のみしか学習できない問題が発生する可能性あり
+    #
+    # 空文字列の場合はスクラッチ学習
+    pretrained_weights_path: str = "/deeparea/sokabe/weight/model_swinvit.pt"
 
 
 @dataclass

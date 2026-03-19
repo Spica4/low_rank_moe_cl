@@ -128,13 +128,7 @@ class SwinUNETRMoE(nn.Module):
         # 事前学習済み重みのロード
         pretrained_path = self.config.model.pretrained_weights_path
         if pretrained_path:
-            weights = torch.load(pretrained_path, map_location="cpu")
-            # MONAI の load_from() は {"state_dict": {"module.xxx": tensor}} 形式を期待する
-            # フラットな state_dict の場合はラップして渡す
-            if "state_dict" not in weights:
-                weights = {"state_dict": weights}
-            self.base_model.load_from(weights=weights)
-            print(f"[事前学習済み重みをロード] {pretrained_path}")
+            self._load_pretrained_weights(pretrained_path)
         else:
             print("[警告] 事前学習済み重みが指定されていません。スクラッチ学習を行います。")
             print("  config.model.pretrained_weights_path にパスを設定することを推奨します。")
@@ -142,6 +136,97 @@ class SwinUNETRMoE(nn.Module):
         # ベースモデルのパラメータを凍結
         for param in self.base_model.parameters():
             param.requires_grad = False
+
+    def _load_pretrained_weights(self, pretrained_path: str):
+        """
+        事前学習済み重みをロードする。
+        以下の2つの形式を自動判別する:
+
+        1. フルSwinUNETRチェックポイント:
+           encoder/decoderブロックを含む完全な重み。
+           セグメンテーション学習済みモデルが該当。
+           → load_state_dict() で全層をロード
+
+        2. SwinViTのみのチェックポイント:
+           SSL事前学習済みのSwinViTエンコーダ重みのみ。
+           model_swinvit.pt が該当。
+           → MONAI の load_from() でエンコーダのみロード
+           ※ encoder/decoderブロックはランダム初期化のまま
+        """
+        raw = torch.load(pretrained_path, map_location="cpu")
+
+        # state_dict を取り出す（チェックポイント形式の差異を吸収）
+        if isinstance(raw, dict):
+            if "state_dict" in raw:
+                state_dict = raw["state_dict"]
+            elif "model" in raw:
+                state_dict = raw["model"]
+            else:
+                state_dict = raw
+        else:
+            state_dict = raw
+
+        # "module." プレフィックスを除去（DataParallel 対応）
+        state_dict = {
+            k.replace("module.", ""): v for k, v in state_dict.items()
+        }
+
+        # フルSwinUNETRか SwinViTのみか を判定
+        has_encoder_blocks = any(
+            k.startswith(("encoder1", "encoder2", "encoder3", "encoder4", "encoder10"))
+            for k in state_dict
+        )
+        has_decoder_blocks = any(
+            k.startswith(("decoder2", "decoder3", "decoder4", "decoder5"))
+            for k in state_dict
+        )
+
+        if has_encoder_blocks or has_decoder_blocks:
+            self._load_full_swinunetr(state_dict, pretrained_path)
+        else:
+            self._load_swinvit_only(raw, pretrained_path)
+
+    def _load_full_swinunetr(self, state_dict: dict, path: str):
+        """フルSwinUNETRチェックポイントをロード"""
+        # out層は後で _update_seg_head() で差し替えるため除外
+        filtered = {
+            k: v for k, v in state_dict.items() if not k.startswith("out")
+        }
+
+        missing, unexpected = self.base_model.load_state_dict(
+            filtered, strict=False
+        )
+
+        # ロード結果を表示
+        loaded_parts = []
+        if any(k.startswith("swinViT") for k in state_dict):
+            loaded_parts.append("SwinViT")
+        if any(k.startswith(("encoder1", "encoder2", "encoder3", "encoder4")) for k in state_dict):
+            loaded_parts.append("encoder blocks")
+        if any(k.startswith("encoder10") for k in state_dict):
+            loaded_parts.append("bottleneck")
+        if any(k.startswith(("decoder2", "decoder3", "decoder4", "decoder5")) for k in state_dict):
+            loaded_parts.append("decoder blocks")
+
+        print(f"[事前学習済み重みをロード（フルSwinUNETR）] {path}")
+        print(f"  ロード済み: {', '.join(loaded_parts)}")
+        if missing:
+            # out層の除外分を差し引く
+            non_out_missing = [k for k in missing if not k.startswith("out")]
+            if non_out_missing:
+                print(f"  未ロード: {len(non_out_missing)}個のパラメータ")
+        if unexpected:
+            print(f"  無視: {len(unexpected)}個の不明なキー")
+
+    def _load_swinvit_only(self, raw_weights: dict, path: str):
+        """SwinViTのみのチェックポイントをロード（MONAI load_from 経由）"""
+        if isinstance(raw_weights, dict) and "state_dict" not in raw_weights:
+            raw_weights = {"state_dict": raw_weights}
+        self.base_model.load_from(weights=raw_weights)
+        print(f"[事前学習済み重みをロード（SwinViTのみ）] {path}")
+        print(f"  注意: encoder/decoderブロックの事前学習済み重みは含まれていません。")
+        print(f"  → encoder/decoderはランダム初期化のまま凍結されます。")
+        print(f"  → フルSwinUNETRチェックポイントの使用を推奨します。")
 
     def _inject_moe_layers(self):
         """
@@ -350,6 +435,9 @@ class SwinUNETRMoE(nn.Module):
             "seg_head": 0,
             "total_trainable": 0,
             "total_frozen": 0,
+            "frozen_swinvit": 0,
+            "frozen_encoder_blocks": 0,
+            "frozen_decoder_blocks": 0,
         }
 
         for name, param in self.named_parameters():
@@ -362,6 +450,12 @@ class SwinUNETRMoE(nn.Module):
                     counts["seg_head"] += param.numel()
                 counts["total_trainable"] += param.numel()
             else:
+                if "swinViT" in name:
+                    counts["frozen_swinvit"] += param.numel()
+                elif "base_model.encoder" in name:
+                    counts["frozen_encoder_blocks"] += param.numel()
+                elif "base_model.decoder" in name:
+                    counts["frozen_decoder_blocks"] += param.numel()
                 counts["total_frozen"] += param.numel()
 
         return counts
