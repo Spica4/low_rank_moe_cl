@@ -61,8 +61,17 @@ class _MoEAttnWrapper(nn.Module):
             q, k, v = qkv.unbind(0)
             scale = self.moe_attn.head_dim ** -0.5
             attn = (q @ k.transpose(-2, -1)) * scale
+            # 相対位置バイアスを加算
+            if self.moe_attn.relative_position_bias_table is not None:
+                relative_position_bias = self.moe_attn.relative_position_bias_table[
+                    self.moe_attn.relative_position_index[:N, :N].reshape(-1)
+                ].reshape(N, N, -1).permute(2, 0, 1).contiguous()
+                attn = attn + relative_position_bias.unsqueeze(0)
             if mask is not None:
-                attn = attn + mask
+                nW = mask.shape[0]
+                attn = attn.view(B // nW, nW, self.moe_attn.num_heads, N, N)
+                attn = attn + mask.unsqueeze(1).unsqueeze(0)
+                attn = attn.view(-1, self.moe_attn.num_heads, N, N)
             attn = attn.softmax(dim=-1)
             out = (attn @ v).transpose(1, 2).reshape(B, N, C)
             return self.moe_attn.proj(out)
@@ -281,6 +290,18 @@ class SwinUNETRMoE(nn.Module):
                     if hasattr(attn, 'qkv') and hasattr(attn, 'proj'):
                         embed_dim = attn.proj.in_features
 
+                        # 相対位置バイアスをコピー（Swin Transformer の必須コンポーネント）
+                        rel_pos_bias_table = (
+                            attn.relative_position_bias_table.data.clone()
+                            if hasattr(attn, 'relative_position_bias_table')
+                            else None
+                        )
+                        rel_pos_index = (
+                            attn.relative_position_index.clone()
+                            if hasattr(attn, 'relative_position_index')
+                            else None
+                        )
+
                         moe_attn = LoRAMoEAttention(
                             embed_dim=embed_dim,
                             num_heads=attn.num_heads if hasattr(attn, 'num_heads') else 8,
@@ -290,6 +311,8 @@ class SwinUNETRMoE(nn.Module):
                             pretrained_proj_weight=attn.proj.weight.data.clone(),
                             pretrained_qkv_bias=attn.qkv.bias.data.clone() if attn.qkv.bias is not None else None,
                             pretrained_proj_bias=attn.proj.bias.data.clone() if attn.proj.bias is not None else None,
+                            relative_position_bias_table=rel_pos_bias_table,
+                            relative_position_index=rel_pos_index,
                         )
                         self.moe_attn_layers.append(moe_attn)
 

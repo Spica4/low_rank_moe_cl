@@ -205,6 +205,8 @@ class LoRAMoEAttention(nn.Module):
         pretrained_proj_weight: torch.Tensor = None,
         pretrained_qkv_bias: torch.Tensor = None,
         pretrained_proj_bias: torch.Tensor = None,
+        relative_position_bias_table: torch.Tensor = None,
+        relative_position_index: torch.Tensor = None,
     ):
         """
         Swin TransformerではQKVが一つの線形層にまとまっている場合があるため、
@@ -234,6 +236,19 @@ class LoRAMoEAttention(nn.Module):
             self.proj.bias.data.copy_(pretrained_proj_bias)
         for param in self.proj.parameters():
             param.requires_grad = False
+
+        # 相対位置バイアス（Swin Transformer の必須コンポーネント）
+        # これがないと attention logit が大きくなり fp16 で NaN overflow が発生する
+        if relative_position_bias_table is not None:
+            self.register_buffer(
+                "relative_position_bias_table", relative_position_bias_table
+            )
+            self.register_buffer(
+                "relative_position_index", relative_position_index
+            )
+        else:
+            self.relative_position_bias_table = None
+            self.relative_position_index = None
 
         # エキスパートLoRAパラメータ
         # QKV用: A [rank, embed_dim], B [3*embed_dim, rank]
@@ -321,6 +336,15 @@ class LoRAMoEAttention(nn.Module):
         # Scaled dot-product attention
         scale = self.head_dim ** -0.5
         attn = (q @ k.transpose(-2, -1)) * scale
+
+        # 相対位置バイアスを加算（Swin Transformer に必須）
+        # これを省くと attention logit が大きくなり fp16 で nan overflow が起きる
+        if self.relative_position_bias_table is not None:
+            relative_position_bias = self.relative_position_bias_table[
+                self.relative_position_index[:N, :N].reshape(-1)
+            ].reshape(N, N, -1).permute(2, 0, 1).contiguous()  # [nH, N, N]
+            attn = attn + relative_position_bias.unsqueeze(0)
+
         if mask is not None:
             # MONAI shifted-window mask: (nW, N, N)
             # attn: (B*nW, num_heads, N, N) → reshape して加算
