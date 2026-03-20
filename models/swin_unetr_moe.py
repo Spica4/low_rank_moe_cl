@@ -20,36 +20,57 @@ from .language_gating import LanguageGuidedGating, CLIPTextEncoder
 class _MoEFFNWrapper(nn.Module):
     """
     SwinTransformerBlock.mlp をMoE FFNに差し替えるラッパー。
-    block.mlp(x) → moe_ffn.forward_single_expert(x, expert_idx)
+
+    学習時: 固定エキスパート（_current_expert_idx）を使用
+    テスト時: LanguageGuidedGating による CLIP Top-1 ルーティングを使用
     """
 
-    def __init__(self, moe_ffn: LoRAMoEFFN, model_ref: "SwinUNETRMoE"):
+    def __init__(
+        self,
+        moe_ffn: LoRAMoEFFN,
+        model_ref: "SwinUNETRMoE",
+        gating_key: str,
+    ):
         super().__init__()
         self.moe_ffn = moe_ffn
-        # weakref を使い PyTorch のモジュールツリーに循環参照を作らない
         self._model_ref = weakref.ref(model_ref)
+        self._gating_key = gating_key
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.moe_ffn.num_experts == 0:
-            # エキスパート未追加時はベース重みのみで計算
             h = self.moe_ffn.activation(self.moe_ffn.base_wi(x))
             return self.moe_ffn.base_wo(h)
-        expert_idx = self._model_ref()._current_expert_idx
-        return self.moe_ffn.forward_single_expert(x, expert_idx)
+
+        model = self._model_ref()
+
+        # テスト時かつエキスパートが複数: CLIP ルーティング
+        if model._is_test_mode and self.moe_ffn.num_experts > 1:
+            gating = model.gating_modules[self._gating_key]
+            routing_weights, _ = gating.forward_test(x, model.text_embeddings)
+            return self.moe_ffn.forward_routed(x, routing_weights)
+
+        # 学習時 / エキスパートが1つ: 固定エキスパート
+        return self.moe_ffn.forward_single_expert(x, model._current_expert_idx)
 
 
 class _MoEAttnWrapper(nn.Module):
     """
     SwinTransformerBlock.attn をMoE Attentionに差し替えるラッパー。
-    MONAI の WindowAttention は (out, attn_weights) を返すため同じ I/F に合わせる。
-    入力 x は window-partitioned: (num_windows*B, window_size^3, C)
+
+    学習時: 固定エキスパート（_current_expert_idx）を使用
+    テスト時: LanguageGuidedGating による CLIP Top-1 ルーティングを使用
     """
 
-    def __init__(self, moe_attn: LoRAMoEAttention, model_ref: "SwinUNETRMoE"):
+    def __init__(
+        self,
+        moe_attn: LoRAMoEAttention,
+        model_ref: "SwinUNETRMoE",
+        gating_key: str,
+    ):
         super().__init__()
         self.moe_attn = moe_attn
-        # weakref を使い PyTorch のモジュールツリーに循環参照を作らない
         self._model_ref = weakref.ref(model_ref)
+        self._gating_key = gating_key
 
     def forward(self, x: torch.Tensor, mask=None) -> torch.Tensor:
         if self.moe_attn.num_experts == 0:
@@ -61,7 +82,6 @@ class _MoEAttnWrapper(nn.Module):
             q, k, v = qkv.unbind(0)
             scale = self.moe_attn.head_dim ** -0.5
             attn = (q @ k.transpose(-2, -1)) * scale
-            # 相対位置バイアスを加算
             if self.moe_attn.relative_position_bias_table is not None:
                 relative_position_bias = self.moe_attn.relative_position_bias_table[
                     self.moe_attn.relative_position_index[:N, :N].reshape(-1)
@@ -75,8 +95,17 @@ class _MoEAttnWrapper(nn.Module):
             attn = attn.softmax(dim=-1)
             out = (attn @ v).transpose(1, 2).reshape(B, N, C)
             return self.moe_attn.proj(out)
-        expert_idx = self._model_ref()._current_expert_idx
-        return self.moe_attn.forward_single_expert(x, expert_idx, mask=mask)
+
+        model = self._model_ref()
+
+        # テスト時かつエキスパートが複数: CLIP ルーティング
+        if model._is_test_mode and self.moe_attn.num_experts > 1:
+            gating = model.gating_modules[self._gating_key]
+            routing_weights, _ = gating.forward_test(x, model.text_embeddings)
+            return self.moe_attn.forward_routed(x, routing_weights, attn_mask=mask)
+
+        # 学習時 / エキスパートが1つ: 固定エキスパート
+        return self.moe_attn.forward_single_expert(x, model._current_expert_idx, mask=mask)
 
 
 class SwinUNETRMoE(nn.Module):
@@ -100,8 +129,10 @@ class SwinUNETRMoE(nn.Module):
         self.current_step = 0
         self.text_embeddings: List[torch.Tensor] = []
 
-        # forward時に各ラッパーが参照するエキスパートインデックス
+        # forward時に各ラッパーが参照するエキスパートインデックス（学習時）
         self._current_expert_idx: int = 0
+        # テスト時は True → ラッパーが CLIP ルーティングを使用する
+        self._is_test_mode: bool = False
 
         # CLIPテキストエンコーダ
         self.clip_encoder = CLIPTextEncoder(config.model.clip_model_name)
@@ -283,7 +314,7 @@ class SwinUNETRMoE(nn.Module):
                         self.gating_modules[f"ffn_{layer_idx}"] = gating
 
                         # block.mlp をラッパーで置き換え
-                        block.mlp = _MoEFFNWrapper(moe_ffn, self)
+                        block.mlp = _MoEFFNWrapper(moe_ffn, self, f"ffn_{layer_idx}")
 
                     # --- Attention の MoE化 ---
                     attn = block.attn
@@ -323,7 +354,7 @@ class SwinUNETRMoE(nn.Module):
                         self.gating_modules[f"attn_{layer_idx}"] = gating_attn
 
                         # block.attn をラッパーで置き換え
-                        block.attn = _MoEAttnWrapper(moe_attn, self)
+                        block.attn = _MoEAttnWrapper(moe_attn, self, f"attn_{layer_idx}")
 
                     layer_idx += 1
 
@@ -446,9 +477,12 @@ class SwinUNETRMoE(nn.Module):
             logits: [batch, num_classes, H, W, D]
         """
         if training_step is not None:
+            # 学習時: 指定ステップのエキスパートを固定使用
             self._current_expert_idx = training_step - 1
+            self._is_test_mode = False
         else:
-            self._current_expert_idx = self.current_step - 1
+            # テスト時: CLIP ゲーティングによるルーティングを使用
+            self._is_test_mode = True
 
         return self.base_model(x)
 

@@ -314,6 +314,36 @@ class LoRAMoEAttention(nn.Module):
             lora_out = lora_out + h * self.scaling
         return lora_out
 
+    def forward_routed(
+        self,
+        x: torch.Tensor,
+        routing_weights: torch.Tensor,
+        attn_mask: torch.Tensor = None,
+    ) -> torch.Tensor:
+        """
+        ルーティングベースのAttentionフォワードパス（テスト時に使用）
+
+        各トークンが最も重みの高いエキスパートのAttentionを受け取る。
+        Attentionはトークン間の相互作用があるため、エキスパートごとに
+        全シーケンスを計算したうえでトークンマスクで出力を選択する。
+
+        x: [batch, seq_len, embed_dim]
+        routing_weights: [batch, seq_len, num_experts]
+        attn_mask: shifted-window mask (SwinTransformer 用)
+        """
+        expert_indices = routing_weights.argmax(dim=-1)  # [batch, seq_len]
+        output = torch.zeros_like(x)
+
+        for expert_idx in range(self.num_experts):
+            token_mask = (expert_indices == expert_idx)  # [batch, seq_len]
+            if not token_mask.any():
+                continue
+            expert_out = self.forward_single_expert(x, expert_idx, mask=attn_mask)
+            mask_expanded = token_mask.unsqueeze(-1).expand_as(output)
+            output = output + expert_out * mask_expanded.float()
+
+        return output
+
     def forward_single_expert(
         self,
         x: torch.Tensor,
