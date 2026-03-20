@@ -378,15 +378,46 @@ class SwinUNETRMoE(nn.Module):
         print(f"[Step {step} 準備完了] エキスパート数: {step}, クラス数: {num_classes}")
 
     def _update_seg_head(self, num_classes: int, device: str = "cuda"):
-        """base_model.out を新しいクラス数のConvに差し替える"""
+        """
+        base_model.out を新しいクラス数の Conv3d に差し替える。
+        旧ヘッドが持つクラス分の重みは新ヘッドへコピーし、
+        新規クラス分のみランダム初期化とする。
+        """
         old_out = self.base_model.out
-        if hasattr(old_out, 'conv') and hasattr(old_out.conv, 'conv'):
-            in_channels = old_out.conv.conv.in_channels
+
+        # 旧ヘッドの Conv3d を取得（初回は MONAI UnetOutBlock、以降は plain Conv3d）
+        if isinstance(old_out, nn.Conv3d):
+            old_conv = old_out
+        elif hasattr(old_out, 'conv') and hasattr(old_out.conv, 'conv'):
+            old_conv = old_out.conv.conv
+        else:
+            old_conv = None
+
+        if old_conv is not None:
+            in_channels = old_conv.in_channels
+            old_num_classes = old_conv.out_channels
+            old_weight = old_conv.weight.data.clone()
+            old_bias = old_conv.bias.data.clone() if old_conv.bias is not None else None
         else:
             in_channels = self.config.model.feature_size
+            old_num_classes = 0
+            old_weight = None
+            old_bias = None
 
         new_out = nn.Conv3d(in_channels=in_channels, out_channels=num_classes, kernel_size=1)
         new_out = new_out.to(device)
+
+        # 旧クラスの学習済み重みを引き継ぐ
+        if old_weight is not None and 0 < old_num_classes <= num_classes:
+            with torch.no_grad():
+                new_out.weight.data[:old_num_classes] = old_weight.to(device)
+                if old_bias is not None and new_out.bias is not None:
+                    new_out.bias.data[:old_num_classes] = old_bias.to(device)
+            print(f"  [セグヘッド更新] {old_num_classes}クラスの重みを引き継ぎ、"
+                  f"{num_classes - old_num_classes}クラスをランダム初期化")
+        else:
+            print(f"  [セグヘッド更新] {num_classes}クラスをランダム初期化")
+
         for param in new_out.parameters():
             param.requires_grad = True
 
