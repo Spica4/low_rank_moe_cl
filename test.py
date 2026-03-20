@@ -129,11 +129,8 @@ def main():
 
     # Step1データセットの評価
     if args.step1_test_dir:
-        step1_loader = get_dataloader(
-            data_dir=args.step1_test_dir,
-            batch_size=1,
-            is_train=False,
-        )
+        config.data.step1_val_dir = args.step1_test_dir
+        step1_loader = get_dataloader(config, step=1, is_train=False, use_cache=False)
         per_sample, avg_dice = evaluate_dataset(
             model, step1_loader,
             num_classes=config.data.total_num_classes,
@@ -145,11 +142,8 @@ def main():
 
     # Step2データセットの評価
     if args.step2_test_dir:
-        step2_loader = get_dataloader(
-            data_dir=args.step2_test_dir,
-            batch_size=1,
-            is_train=False,
-        )
+        config.data.step2_val_dir = args.step2_test_dir
+        step2_loader = get_dataloader(config, step=2, is_train=False, use_cache=False)
         per_sample, avg_dice = evaluate_dataset(
             model, step2_loader,
             num_classes=config.data.total_num_classes,
