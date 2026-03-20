@@ -115,4 +115,8 @@ class Config:
     data: DataConfig = field(default_factory=DataConfig)
     seed: int = 42
     device: str = "cuda"
-    use_amp: bool = True                   # Mixed Precision Training
+    use_amp: bool = True                   # Mixed Precision Training (False で fp32 無効化)
+    # amp_dtype: fp16 は事前学習済みの大きな特徴量でオーバーフロー（NaN）が発生する
+    # bf16 推奨: fp32 と同じ指数部を持つためオーバーフロー不可、かつ fp32 より高速
+    # "bf16" (推奨), "fp16" (古いGPU), "fp32" (use_amp=False と同等)
+    amp_dtype: str = "bf16"

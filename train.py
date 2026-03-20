@@ -17,7 +17,8 @@ import torch
 import torch.nn as nn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
-from torch.cuda.amp import GradScaler, autocast
+from torch.cuda.amp import GradScaler
+from torch.amp import autocast
 
 from monai.inferers import sliding_window_inference
 
@@ -64,6 +65,16 @@ def build_scheduler(optimizer, num_epochs: int, warmup_epochs: int = 10):
     return scheduler
 
 
+def _get_amp_dtype(amp_dtype: str):
+    """設定文字列を torch dtype に変換"""
+    if amp_dtype == "bf16":
+        return torch.bfloat16
+    elif amp_dtype == "fp16":
+        return torch.float16
+    else:
+        return torch.float32
+
+
 def train_one_epoch(
     model: SwinUNETRMoE,
     dataloader,
@@ -73,11 +84,13 @@ def train_one_epoch(
     device: str,
     step: int,
     use_amp: bool = True,
+    amp_dtype: str = "bf16",
 ):
     """1エポックの学習"""
     model.train()
     total_loss = 0.0
     num_batches = 0
+    dtype = _get_amp_dtype(amp_dtype)
 
     for batch_data in dataloader:
         # RandCropByPosNegLabeld(num_samples>1) は list[dict] を返す場合がある
@@ -92,14 +105,19 @@ def train_one_epoch(
         optimizer.zero_grad()
 
         if use_amp:
-            with autocast():
+            with autocast(device_type="cuda", dtype=dtype):
                 logits = model(images, training_step=step)
                 loss = criterion(logits, labels)
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.get_trainable_params(), max_norm=1.0)
-            scaler.step(optimizer)
-            scaler.update()
+            if scaler is not None:
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.get_trainable_params(), max_norm=1.0)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.get_trainable_params(), max_norm=1.0)
+                optimizer.step()
         else:
             logits = model(images, training_step=step)
             loss = criterion(logits, labels)
@@ -232,7 +250,10 @@ def train_step(
     )
     scheduler = build_scheduler(optimizer, epochs, config.train.warmup_epochs)
     criterion = DiceCELoss(num_classes=num_classes)
-    scaler = GradScaler() if config.use_amp else None
+    # bf16 は GradScaler 不要（fp32 と同じ指数範囲のためスケーリング不要）
+    # fp16 のみ GradScaler を使用
+    use_scaler = config.use_amp and config.amp_dtype == "fp16"
+    scaler = GradScaler() if use_scaler else None
 
     # --- ログ ---
     logger = TrainingLogger(log_dir=os.path.join(config.train.checkpoint_dir, "logs"))
@@ -244,7 +265,7 @@ def train_step(
         # 学習
         train_loss = train_one_epoch(
             model, train_loader, optimizer, criterion, scaler,
-            device, step, config.use_amp,
+            device, step, config.use_amp, config.amp_dtype,
         )
         scheduler.step()
 
