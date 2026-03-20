@@ -81,16 +81,15 @@ class DataConfig:
 
     # Step2 データセット
     step2_name: str = "LiTS"
-    step2_train_dir: str = "/deeparea/sokabe/Dataset/LiTS/train"
-    step2_val_dir: str = "/deeparea/sokabe/Dataset/LiTS/validation"
+    step2_train_dir: str = "/deeparea/sokabe/Dataset/LiTS/liver_tumor/train"
+    step2_val_dir: str = "/deeparea/sokabe/Dataset/LiTS/liver_tumor/validation"
     step2_num_classes: int = 2              # 例: LiTS = 肝腫瘍 + 背景（新規クラス）
 
     # Step2 ラベルリマップ
-    # LiTS の元ラベル: 0=背景, 1=肝臓, 2=肝腫瘍
-    # Step1 で肝臓(class 6)は学習済みのため、Step2 は肝腫瘍(class 14)のみ学習
-    #   1(肝臓)  → 0(背景扱い: Step2 では学習しない)
-    #   2(肝腫瘍)→ 14(新規クラス)
-    step2_label_remap: dict = field(default_factory=lambda: {1: 0, 2: 14})
+    # liver_tumor ラベル: 0=背景, 1=肝腫瘍
+    # Step2 は肝腫瘍(class 14)のみ学習
+    #   1(肝腫瘍)→ 14(新規クラス)
+    step2_label_remap: dict = field(default_factory=lambda: {1: 14})
 
     # Step1 + Step2 の合計クラス数
     total_num_classes: int = 15             # Step1 + Step2の新規クラス
