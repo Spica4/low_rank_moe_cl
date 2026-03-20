@@ -66,11 +66,12 @@ class LanguageGuidedGating(nn.Module):
         text_feat = self.text_proj(text_embedding)  # [1, embed_dim]
 
         # 入力とテキストの類似度（行列積）
-        # x: [batch, n, c], text_feat: [1, c] → [batch, n, 1]
-        similarity = torch.einsum('bnc,mc->bnm', x, text_feat)  # [batch, n, 1]
+        # x: [..., c], text_feat: [1, c] → [..., 1]
+        # 省略記号 ... により 3D [B, N, C] / 5D [B, D, H, W, C] 両方に対応
+        similarity = torch.einsum('...c,mc->...m', x, text_feat)  # [..., 1]
 
         # ゲーティング重み（sigmoid）
-        gating_weights = torch.sigmoid(similarity)  # [batch, n, 1]
+        gating_weights = torch.sigmoid(similarity)  # [..., 1]
 
         return gating_weights
 

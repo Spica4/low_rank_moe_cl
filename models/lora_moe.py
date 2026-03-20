@@ -165,19 +165,18 @@ class LoRAMoEFFN(nn.Module):
         routing_weights: [batch, seq_len, num_experts]
         """
         # Top-1 ハードルーティング
-        expert_indices = routing_weights.argmax(dim=-1)  # [batch, seq_len]
+        # routing_weights: [..., num_experts]  (3D / 5D 両対応)
+        expert_indices = routing_weights.argmax(dim=-1)  # [...] (最後の次元を除く)
         output = torch.zeros_like(x)
 
         for expert_idx in range(self.num_experts):
-            # このエキスパートに割り当てられたトークンのマスク
-            mask = (expert_indices == expert_idx)  # [batch, seq_len]
+            mask = (expert_indices == expert_idx)  # [...]
             if not mask.any():
                 continue
 
-            # エキスパート出力を計算
             expert_out = self.forward_single_expert(x, expert_idx)
 
-            # マスクされたトークンにのみ出力を割り当て
+            # mask を x と同形状に拡張して適用
             mask_expanded = mask.unsqueeze(-1).expand_as(output)
             output = output + expert_out * mask_expanded.float()
 
@@ -331,6 +330,7 @@ class LoRAMoEAttention(nn.Module):
         routing_weights: [batch, seq_len, num_experts]
         attn_mask: shifted-window mask (SwinTransformer 用)
         """
+        # routing_weights: [batch, seq_len, num_experts]  (Attention は常に 3D)
         expert_indices = routing_weights.argmax(dim=-1)  # [batch, seq_len]
         output = torch.zeros_like(x)
 
