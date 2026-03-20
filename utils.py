@@ -111,6 +111,12 @@ class DiceLoss(nn.Module):
             pred_c = pred[:, c]
             target_c = target_onehot[:, c]
 
+            # GT が存在しないクラスはスキップ
+            # → 他ステップのデータで過去クラスの予測にペナルティを与えず
+            #    catastrophic forgetting を防ぐ
+            if target_c.sum() == 0:
+                continue
+
             intersection = (pred_c * target_c).sum()
             union = pred_c.sum() + target_c.sum()
 

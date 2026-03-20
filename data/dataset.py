@@ -25,6 +25,7 @@ try:
         ScaleIntensityRanged,
         CropForegroundd,
         SpatialPadd,
+        MapLabelValued,
         RandCropByPosNegLabeld,
         RandFlipd,
         RandRotate90d,
@@ -135,12 +136,21 @@ class GenericMedicalDataset(Dataset):
         return item
 
 
-def get_train_transforms(spatial_size: Tuple[int, ...] = (96, 96, 96)):
-    """学習用の前処理パイプライン"""
+def get_train_transforms(
+    spatial_size: Tuple[int, ...] = (96, 96, 96),
+    label_remap: dict = None,
+):
+    """
+    学習用の前処理パイプライン
+
+    Args:
+        label_remap: ラベルリマップ辞書 {元ラベル値: 新ラベル値}
+                     例: {1: 0, 2: 14} → 肝臓(1)を背景(0)、肝腫瘍(2)をclass14に
+    """
     if not MONAI_AVAILABLE:
         return None
 
-    return Compose([
+    transforms = [
         LoadImaged(keys=["image", "label"]),
         EnsureChannelFirstd(keys=["image", "label"]),
         Orientationd(keys=["image", "label"], axcodes="RAS"),
@@ -156,8 +166,20 @@ def get_train_transforms(spatial_size: Tuple[int, ...] = (96, 96, 96)):
             clip=True,
         ),
         CropForegroundd(keys=["image", "label"], source_key="image"),
+    ]
+
+    # ラベルリマップ（例: LiTS Step2: 肝臓→背景, 肝腫瘍→class14）
+    if label_remap is not None:
+        transforms.append(MapLabelValued(
+            keys=["label"],
+            orig_labels=list(label_remap.keys()),
+            target_labels=list(label_remap.values()),
+        ))
+
+    transforms.extend([
         # クロップサイズより小さい画像をパディング（LiTS 等で z 方向が薄い場合に対応）
         SpatialPadd(keys=["image", "label"], spatial_size=spatial_size),
+        # リマップ後のラベルで正例・負例を選ぶ（腫瘍が正例、背景が負例になる）
         RandCropByPosNegLabeld(
             keys=["image", "label"],
             label_key="label",
@@ -174,13 +196,18 @@ def get_train_transforms(spatial_size: Tuple[int, ...] = (96, 96, 96)):
         ToTensord(keys=["image", "label"]),
     ])
 
+    return Compose(transforms)
 
-def get_val_transforms(spatial_size: Tuple[int, ...] = (96, 96, 96)):
+
+def get_val_transforms(
+    spatial_size: Tuple[int, ...] = (96, 96, 96),
+    label_remap: dict = None,
+):
     """検証用の前処理パイプライン"""
     if not MONAI_AVAILABLE:
         return None
 
-    return Compose([
+    transforms = [
         LoadImaged(keys=["image", "label"]),
         EnsureChannelFirstd(keys=["image", "label"]),
         Orientationd(keys=["image", "label"], axcodes="RAS"),
@@ -196,8 +223,17 @@ def get_val_transforms(spatial_size: Tuple[int, ...] = (96, 96, 96)):
             clip=True,
         ),
         CropForegroundd(keys=["image", "label"], source_key="image"),
-        ToTensord(keys=["image", "label"]),
-    ])
+    ]
+
+    if label_remap is not None:
+        transforms.append(MapLabelValued(
+            keys=["label"],
+            orig_labels=list(label_remap.keys()),
+            target_labels=list(label_remap.values()),
+        ))
+
+    transforms.append(ToTensord(keys=["image", "label"]))
+    return Compose(transforms)
 
 
 def get_dataloader(
@@ -228,7 +264,16 @@ def get_dataloader(
     spatial_size = tuple(data_cfg.spatial_size)
     num_workers  = data_cfg.num_workers
 
-    transforms = get_train_transforms(spatial_size) if is_train else get_val_transforms(spatial_size)
+    # ステップ固有のラベルリマップを取得
+    label_remap = getattr(data_cfg, f"step{step}_label_remap", None)
+    if label_remap is not None:
+        print(f"[ラベルリマップ] Step{step}: {label_remap}")
+
+    transforms = (
+        get_train_transforms(spatial_size, label_remap)
+        if is_train
+        else get_val_transforms(spatial_size, label_remap)
+    )
 
     if MONAI_AVAILABLE and use_cache:
         data_list = GenericMedicalDataset(data_dir=data_dir)._scan_directory(data_dir)
