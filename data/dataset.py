@@ -166,20 +166,11 @@ def get_train_transforms(
             clip=True,
         ),
         CropForegroundd(keys=["image", "label"], source_key="image"),
-    ]
-
-    # ラベルリマップ（例: LiTS Step2: 肝臓→背景, 肝腫瘍→class14）
-    if label_remap is not None:
-        transforms.append(MapLabelValued(
-            keys=["label"],
-            orig_labels=list(label_remap.keys()),
-            target_labels=list(label_remap.values()),
-        ))
-
-    transforms.extend([
         # クロップサイズより小さい画像をパディング（LiTS 等で z 方向が薄い場合に対応）
         SpatialPadd(keys=["image", "label"], spatial_size=spatial_size),
-        # リマップ後のラベルで正例・負例を選ぶ（腫瘍が正例、背景が負例になる）
+        # ラベルリマップ前のオリジナルラベルで正例・負例クロップを選ぶ
+        # （例: LiTS Step2 では肝臓(1)が foreground として機能し、腫瘍なし症例でも
+        #   適切にサンプリングされる。リマップは crop 後に適用する）
         RandCropByPosNegLabeld(
             keys=["image", "label"],
             label_key="label",
@@ -189,6 +180,17 @@ def get_train_transforms(
             image_key="image",
             image_threshold=0,
         ),
+    ]
+
+    # ラベルリマップ（crop 後に適用: 例 LiTS Step2: 肝臓→背景, 肝腫瘍→class14）
+    if label_remap is not None:
+        transforms.append(MapLabelValued(
+            keys=["label"],
+            orig_labels=list(label_remap.keys()),
+            target_labels=list(label_remap.values()),
+        ))
+
+    transforms.extend([
         RandFlipd(keys=["image", "label"], spatial_axis=[0], prob=0.10),
         RandFlipd(keys=["image", "label"], spatial_axis=[1], prob=0.10),
         RandFlipd(keys=["image", "label"], spatial_axis=[2], prob=0.10),
