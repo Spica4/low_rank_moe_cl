@@ -16,6 +16,7 @@ import argparse
 import csv
 import os
 import torch
+from monai.inferers import sliding_window_inference
 from config import Config
 from models.swin_unetr_moe import SwinUNETRMoE
 from data.dataset import get_dataloader
@@ -26,6 +27,7 @@ from utils import dice_score, load_checkpoint
 def evaluate_dataset(
     model: SwinUNETRMoE,
     dataloader,
+    config: Config,
     num_classes: int,
     device: str,
     dataset_name: str = "",
@@ -54,8 +56,14 @@ def evaluate_dataset(
         else:
             sample_id = f"sample_{i + 1:04d}"
 
-        # テスト時はtraining_step=Noneでルーティング使用
-        logits = model(images, training_step=None)
+        # テスト時はsliding window inferenceでフル画像を推論
+        logits = sliding_window_inference(
+            inputs=images,
+            roi_size=config.data.spatial_size,
+            sw_batch_size=4,
+            predictor=lambda x: model(x, training_step=None),
+            overlap=0.5,
+        )
         dice = dice_score(logits, labels, num_classes=num_classes)
 
         result = {"sample_id": sample_id}
@@ -133,6 +141,7 @@ def main():
         step1_loader = get_dataloader(config, step=1, is_train=False, use_cache=False)
         per_sample, avg_dice = evaluate_dataset(
             model, step1_loader,
+            config=config,
             num_classes=config.data.total_num_classes,
             device=args.device,
             dataset_name=config.data.step1_name,
@@ -146,6 +155,7 @@ def main():
         step2_loader = get_dataloader(config, step=2, is_train=False, use_cache=False)
         per_sample, avg_dice = evaluate_dataset(
             model, step2_loader,
+            config=config,
             num_classes=config.data.total_num_classes,
             device=args.device,
             dataset_name=config.data.step2_name,
