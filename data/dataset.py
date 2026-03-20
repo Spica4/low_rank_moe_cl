@@ -12,9 +12,6 @@ import os
 import glob
 from typing import Optional, List, Tuple, Dict
 
-import numpy as np
-import nibabel as nib
-
 import torch
 from torch.utils.data import Dataset, DataLoader
 
@@ -241,21 +238,6 @@ def get_val_transforms(
     return Compose(transforms)
 
 
-def filter_has_foreground(data_list: List[Dict[str, str]]) -> List[Dict[str, str]]:
-    """ラベルに foreground（非ゼロボクセル）が含まれない症例を除外する"""
-    filtered = []
-    excluded = 0
-    for item in data_list:
-        label = nib.load(item["label"]).get_fdata()
-        if label.max() > 0:
-            filtered.append(item)
-        else:
-            excluded += 1
-    if excluded > 0:
-        print(f"[フィルタリング] foreground なし症例を除外: {excluded}件 → 残り {len(filtered)}件")
-    return filtered
-
-
 def get_dataloader(
     config,
     step: int,
@@ -302,8 +284,6 @@ def get_dataloader(
                 f"データが見つかりませんでした: {data_dir}\n"
                 f"config.data.step{step}_{'train' if is_train else 'val'}_dir を確認してください。"
             )
-        if is_train:
-            data_list = filter_has_foreground(data_list)
         dataset = CacheDataset(
             data=data_list,
             transform=transforms,
