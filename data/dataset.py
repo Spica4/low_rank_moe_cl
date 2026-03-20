@@ -24,6 +24,7 @@ try:
         Spacingd,
         ScaleIntensityRanged,
         CropForegroundd,
+        SpatialPadd,
         RandCropByPosNegLabeld,
         RandFlipd,
         RandRotate90d,
@@ -155,6 +156,8 @@ def get_train_transforms(spatial_size: Tuple[int, ...] = (96, 96, 96)):
             clip=True,
         ),
         CropForegroundd(keys=["image", "label"], source_key="image"),
+        # クロップサイズより小さい画像をパディング（LiTS 等で z 方向が薄い場合に対応）
+        SpatialPadd(keys=["image", "label"], spatial_size=spatial_size),
         RandCropByPosNegLabeld(
             keys=["image", "label"],
             label_key="label",
