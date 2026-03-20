@@ -106,7 +106,7 @@ class DataConfig:
     )
     step2_text_description: str = (
         "Medical imaging dataset for liver tumor segmentation with the "
-        "following label definitions: 0.background; 1.liver tumor."
+        "following label definitions: 0.background; 14.liver tumor."
     )
 
     # 前処理
