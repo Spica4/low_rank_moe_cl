@@ -42,15 +42,18 @@ class _MoEFFNWrapper(nn.Module):
             return self.moe_ffn.base_wo(h)
 
         model = self._model_ref()
+        gating = model.gating_modules[self._gating_key]
 
-        # テスト時かつエキスパートが複数: CLIP ルーティング
         if model._is_test_mode and self.moe_ffn.num_experts > 1:
-            gating = model.gating_modules[self._gating_key]
+            # テスト時: CLIP Top-1 ルーティング（per-token）
             routing_weights, _ = gating.forward_test(x, model.text_embeddings)
             return self.moe_ffn.forward_routed(x, routing_weights)
 
-        # 学習時 / エキスパートが1つ: 固定エキスパート
-        return self.moe_ffn.forward_single_expert(x, model._current_expert_idx)
+        # 学習時: 現ステップのテキスト embedding でゲーティングを適用してから固定エキスパートへ
+        expert_idx = model._current_expert_idx
+        text_emb = model.text_embeddings[expert_idx]
+        gated_x = gating.forward_train(x, text_emb)
+        return self.moe_ffn.forward_single_expert(gated_x, expert_idx)
 
 
 class _MoEAttnWrapper(nn.Module):
@@ -97,15 +100,18 @@ class _MoEAttnWrapper(nn.Module):
             return self.moe_attn.proj(out)
 
         model = self._model_ref()
+        gating = model.gating_modules[self._gating_key]
 
-        # テスト時かつエキスパートが複数: CLIP ルーティング
         if model._is_test_mode and self.moe_attn.num_experts > 1:
-            gating = model.gating_modules[self._gating_key]
+            # テスト時: CLIP Top-1 ルーティング（per-token）
             routing_weights, _ = gating.forward_test(x, model.text_embeddings)
             return self.moe_attn.forward_routed(x, routing_weights, attn_mask=mask)
 
-        # 学習時 / エキスパートが1つ: 固定エキスパート
-        return self.moe_attn.forward_single_expert(x, model._current_expert_idx, mask=mask)
+        # 学習時: 現ステップのテキスト embedding でゲーティングを適用してから固定エキスパートへ
+        expert_idx = model._current_expert_idx
+        text_emb = model.text_embeddings[expert_idx]
+        gated_x = gating.forward_train(x, text_emb)
+        return self.moe_attn.forward_single_expert(gated_x, expert_idx, mask=mask)
 
 
 class SwinUNETRMoE(nn.Module):
