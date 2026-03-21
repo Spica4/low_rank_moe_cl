@@ -21,20 +21,20 @@ class _MoEFFNWrapper(nn.Module):
     """
     SwinTransformerBlock.mlp をMoE FFNに差し替えるラッパー。
 
-    学習時: 固定エキスパート（_current_expert_idx）を使用
-    テスト時: LanguageGuidedGating による CLIP Top-1 ルーティングを使用
+    学習時: 現ステップ固有のゲーティングで x を変調 → 固定エキスパートへ
+    テスト時: 全ステップのゲーティングでGWを計算 → Top-1ハードルーティング
     """
 
     def __init__(
         self,
         moe_ffn: LoRAMoEFFN,
         model_ref: "SwinUNETRMoE",
-        gating_key: str,
+        layer_key: str,
     ):
         super().__init__()
         self.moe_ffn = moe_ffn
         self._model_ref = weakref.ref(model_ref)
-        self._gating_key = gating_key
+        self._layer_key = layer_key  # e.g. "ffn_0"
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.moe_ffn.num_experts == 0:
@@ -42,17 +42,35 @@ class _MoEFFNWrapper(nn.Module):
             return self.moe_ffn.base_wo(h)
 
         model = self._model_ref()
-        gating = model.gating_modules[self._gating_key]
 
         if model._is_test_mode and self.moe_ffn.num_experts > 1:
-            # テスト時: CLIP Top-1 ルーティング（per-token）
-            routing_weights, _ = gating.forward_test(x, model.text_embeddings)
-            return self.moe_ffn.forward_routed(x, routing_weights)
+            # テスト時: 各ステップのゲーティングでGW計算 → Top-1ハードルーティング
+            # 画像 Testing stage: GW_btcv, GW_lits → Top-1 → E1/E2
+            gws = []
+            for step_idx in range(model.current_step):
+                gating = model.gating_modules[f"step{step_idx}_{self._layer_key}"]
+                gw = gating.compute_gating_weights(x, model.text_embeddings[step_idx])
+                gws.append(gw)
 
-        # 学習時: 現ステップのテキスト embedding でゲーティングを適用してから固定エキスパートへ
+            # [..., num_experts] → argmax でルーティング先を決定
+            routing_weights = torch.cat(gws, dim=-1)
+            expert_indices = routing_weights.argmax(dim=-1)
+
+            output = torch.zeros_like(x)
+            for step_idx in range(model.current_step):
+                mask = (expert_indices == step_idx)
+                if not mask.any():
+                    continue
+                # 各エキスパートへはそのステップのGWで変調した x を渡す
+                gated_x = x * gws[step_idx]
+                expert_out = self.moe_ffn.forward_single_expert(gated_x, step_idx)
+                output = output + expert_out * mask.unsqueeze(-1).expand_as(output).float()
+            return output
+
+        # 学習時: 現ステップ固有のゲーティングで変調してから固定エキスパートへ
         expert_idx = model._current_expert_idx
-        text_emb = model.text_embeddings[expert_idx]
-        gated_x = gating.forward_train(x, text_emb)
+        gating = model.gating_modules[f"step{expert_idx}_{self._layer_key}"]
+        gated_x = gating.forward_train(x, model.text_embeddings[expert_idx])
         return self.moe_ffn.forward_single_expert(gated_x, expert_idx)
 
 
@@ -60,20 +78,20 @@ class _MoEAttnWrapper(nn.Module):
     """
     SwinTransformerBlock.attn をMoE Attentionに差し替えるラッパー。
 
-    学習時: 固定エキスパート（_current_expert_idx）を使用
-    テスト時: LanguageGuidedGating による CLIP Top-1 ルーティングを使用
+    学習時: 現ステップ固有のゲーティングで x を変調 → 固定エキスパートへ
+    テスト時: 全ステップのゲーティングでGWを計算 → Top-1ハードルーティング
     """
 
     def __init__(
         self,
         moe_attn: LoRAMoEAttention,
         model_ref: "SwinUNETRMoE",
-        gating_key: str,
+        layer_key: str,
     ):
         super().__init__()
         self.moe_attn = moe_attn
         self._model_ref = weakref.ref(model_ref)
-        self._gating_key = gating_key
+        self._layer_key = layer_key  # e.g. "attn_0"
 
     def forward(self, x: torch.Tensor, mask=None) -> torch.Tensor:
         if self.moe_attn.num_experts == 0:
@@ -100,17 +118,32 @@ class _MoEAttnWrapper(nn.Module):
             return self.moe_attn.proj(out)
 
         model = self._model_ref()
-        gating = model.gating_modules[self._gating_key]
 
         if model._is_test_mode and self.moe_attn.num_experts > 1:
-            # テスト時: CLIP Top-1 ルーティング（per-token）
-            routing_weights, _ = gating.forward_test(x, model.text_embeddings)
-            return self.moe_attn.forward_routed(x, routing_weights, attn_mask=mask)
+            # テスト時: 各ステップのゲーティングでGW計算 → Top-1ハードルーティング
+            gws = []
+            for step_idx in range(model.current_step):
+                gating = model.gating_modules[f"step{step_idx}_{self._layer_key}"]
+                gw = gating.compute_gating_weights(x, model.text_embeddings[step_idx])
+                gws.append(gw)
 
-        # 学習時: 現ステップのテキスト embedding でゲーティングを適用してから固定エキスパートへ
+            routing_weights = torch.cat(gws, dim=-1)  # [B*nW, N, num_experts]
+            expert_indices = routing_weights.argmax(dim=-1)  # [B*nW, N]
+
+            output = torch.zeros_like(x)
+            for step_idx in range(model.current_step):
+                mask_tok = (expert_indices == step_idx)
+                if not mask_tok.any():
+                    continue
+                gated_x = x * gws[step_idx]
+                expert_out = self.moe_attn.forward_single_expert(gated_x, step_idx, mask=mask)
+                output = output + expert_out * mask_tok.unsqueeze(-1).expand_as(output).float()
+            return output
+
+        # 学習時: 現ステップ固有のゲーティングで変調してから固定エキスパートへ
         expert_idx = model._current_expert_idx
-        text_emb = model.text_embeddings[expert_idx]
-        gated_x = gating.forward_train(x, text_emb)
+        gating = model.gating_modules[f"step{expert_idx}_{self._layer_key}"]
+        gated_x = gating.forward_train(x, model.text_embeddings[expert_idx])
         return self.moe_attn.forward_single_expert(gated_x, expert_idx, mask=mask)
 
 
@@ -150,8 +183,11 @@ class SwinUNETRMoE(nn.Module):
         self.moe_ffn_layers: nn.ModuleList = nn.ModuleList()
         self.moe_attn_layers: nn.ModuleList = nn.ModuleList()
 
-        # 言語ガイドゲーティング
+        # 言語ガイドゲーティング（ステップ別に格納: "step{i}_ffn_{j}", "step{i}_attn_{j}"）
         self.gating_modules: nn.ModuleDict = nn.ModuleDict()
+
+        # 各レイヤーの embed_dim を記録（prepare_step でゲーティング生成に使用）
+        self._layer_embed_dims: Dict[str, int] = {}
 
         # MoEを作成し、ブロックのmlp/attnを差し替え
         self._inject_moe_layers()
@@ -312,12 +348,7 @@ class SwinUNETRMoE(nn.Module):
                             pretrained_bo=_fc2.bias.data.clone() if _fc2.bias is not None else None,
                         )
                         self.moe_ffn_layers.append(moe_ffn)
-
-                        gating = LanguageGuidedGating(
-                            embed_dim=embed_dim,
-                            clip_embed_dim=self.config.model.clip_embed_dim,
-                        )
-                        self.gating_modules[f"ffn_{layer_idx}"] = gating
+                        self._layer_embed_dims[f"ffn_{layer_idx}"] = embed_dim
 
                         # block.mlp をラッパーで置き換え
                         block.mlp = _MoEFFNWrapper(moe_ffn, self, f"ffn_{layer_idx}")
@@ -352,12 +383,7 @@ class SwinUNETRMoE(nn.Module):
                             relative_position_index=rel_pos_index,
                         )
                         self.moe_attn_layers.append(moe_attn)
-
-                        gating_attn = LanguageGuidedGating(
-                            embed_dim=embed_dim,
-                            clip_embed_dim=self.config.model.clip_embed_dim,
-                        )
-                        self.gating_modules[f"attn_{layer_idx}"] = gating_attn
+                        self._layer_embed_dims[f"attn_{layer_idx}"] = embed_dim
 
                         # block.attn をラッパーで置き換え
                         block.attn = _MoEAttnWrapper(moe_attn, self, f"attn_{layer_idx}")
@@ -391,18 +417,31 @@ class SwinUNETRMoE(nn.Module):
         assert step == self.current_step + 1, \
             f"ステップは順番に実行してください。現在: {self.current_step}, 要求: {step}"
 
-        # 前ステップのエキスパートを凍結
+        # 前ステップのエキスパートとゲーティングを凍結
         if self.current_step > 0:
+            prev_idx = self.current_step - 1
             for moe_ffn in self.moe_ffn_layers:
-                moe_ffn.freeze_expert(self.current_step - 1)
+                moe_ffn.freeze_expert(prev_idx)
             for moe_attn in self.moe_attn_layers:
-                moe_attn.freeze_expert(self.current_step - 1)
+                moe_attn.freeze_expert(prev_idx)
+            for layer_key in self._layer_embed_dims:
+                for param in self.gating_modules[f"step{prev_idx}_{layer_key}"].parameters():
+                    param.requires_grad = False
 
         # 新しいエキスパートを追加
         for moe_ffn in self.moe_ffn_layers:
             moe_ffn.add_expert()
         for moe_attn in self.moe_attn_layers:
             moe_attn.add_expert()
+
+        # 新しいステップのゲーティングを生成
+        new_step_idx = step - 1
+        for layer_key, embed_dim in self._layer_embed_dims.items():
+            gating = LanguageGuidedGating(
+                embed_dim=embed_dim,
+                clip_embed_dim=self.config.model.clip_embed_dim,
+            ).to(device)
+            self.gating_modules[f"step{new_step_idx}_{layer_key}"] = gating
 
         # テキストembeddingを生成
         text_emb = self.clip_encoder.encode(text_description, device=device)
@@ -514,7 +553,10 @@ class SwinUNETRMoE(nn.Module):
                     moe_attn.experts_B_proj[expert_idx],
                 ])
 
-        for gating in self.gating_modules.values():
+        # 現ステップのゲーティングのみ学習（前ステップは凍結済み）
+        step_idx = self.current_step - 1
+        for layer_key in self._layer_embed_dims:
+            gating = self.gating_modules[f"step{step_idx}_{layer_key}"]
             params.extend(gating.parameters())
 
         params.extend(self.seg_head.parameters())

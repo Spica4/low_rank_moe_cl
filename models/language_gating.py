@@ -42,9 +42,6 @@ class LanguageGuidedGating(nn.Module):
         # テキストembeddingを特徴次元に射影
         self.text_proj = nn.Linear(clip_embed_dim, embed_dim, bias=False)
 
-        # ゲーティング重み計算用の線形層
-        self.gate_linear = nn.Linear(embed_dim, 1, bias=True)
-
     def compute_gating_weights(
         self,
         x: torch.Tensor,
@@ -91,40 +88,6 @@ class LanguageGuidedGating(nn.Module):
         """
         gw = self.compute_gating_weights(x, text_embedding)  # [batch, n, 1]
         return x * gw  # [batch, n, c]
-
-    def forward_test(
-        self,
-        x: torch.Tensor,
-        text_embeddings: List[torch.Tensor],
-    ) -> tuple:
-        """
-        テスト時のフォワードパス（Top-1ハードルーティング）
-        
-        論文 Figure 3 の Testing stage:
-        全エキスパートのテキストembeddingからゲーティング重みを計算し、
-        各トークンで最大のエキスパートを選択
-        
-        x: [batch, n, c]
-        text_embeddings: List of [clip_dim] テンソル（各エキスパート）
-        
-        return:
-            routing_weights: [batch, n, num_experts]
-            expert_indices: [batch, n] (Top-1のエキスパートインデックス)
-        """
-        num_experts = len(text_embeddings)
-        gating_weights_list = []
-
-        for text_emb in text_embeddings:
-            gw = self.compute_gating_weights(x, text_emb)  # [batch, n, 1]
-            gating_weights_list.append(gw)
-
-        # [batch, n, num_experts]
-        routing_weights = torch.cat(gating_weights_list, dim=-1)
-
-        # Top-1 ハードルーティング
-        expert_indices = routing_weights.argmax(dim=-1)  # [batch, n]
-
-        return routing_weights, expert_indices
 
 
 class CLIPTextEncoder(nn.Module):
