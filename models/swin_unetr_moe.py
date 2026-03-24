@@ -482,7 +482,7 @@ class SwinUNETRMoE(nn.Module):
         new_out = new_out.to(device)
 
         # 旧クラスの学習済み重みを引き継ぐ
-        if old_weight is not None and 0 < old_num_classes <= num_classes:
+        if old_weight is not None and 0 < old_num_classes < num_classes:
             with torch.no_grad():
                 new_out.weight.data[:old_num_classes] = old_weight.to(device)
                 if old_bias is not None and new_out.bias is not None:
