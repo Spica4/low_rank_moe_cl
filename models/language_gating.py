@@ -49,11 +49,11 @@ class LanguageGuidedGating(nn.Module):
     ) -> torch.Tensor:
         """
         単一エキスパートのゲーティング重みを計算
-        
+
         論文 Figure 3 の Training stage:
         x: [batch, n, c] (n = h×w×d for 3D, n = seq_len)
         text_embedding: [1, clip_dim] or [clip_dim]
-        
+
         return: gating_weights [batch, n, 1]
         """
         if text_embedding.dim() == 1:
@@ -71,6 +71,23 @@ class LanguageGuidedGating(nn.Module):
         gating_weights = torch.sigmoid(similarity)  # [..., 1]
 
         return gating_weights
+
+    def compute_logits(
+        self,
+        x: torch.Tensor,
+        text_embedding: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Sigmoid 適用前の生ロジットを返す（テスト時のSoftmax競合ルーティング用）
+
+        x: [batch, n, c]
+        text_embedding: [1, clip_dim] or [clip_dim]
+        return: logits [..., 1]
+        """
+        if text_embedding.dim() == 1:
+            text_embedding = text_embedding.unsqueeze(0)
+        text_feat = self.text_proj(text_embedding)  # [1, embed_dim]
+        return torch.einsum('...c,mc->...m', x, text_feat)  # [..., 1]
 
     def forward_train(
         self,
