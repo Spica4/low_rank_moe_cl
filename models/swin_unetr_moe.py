@@ -489,8 +489,26 @@ class SwinUNETRMoE(nn.Module):
                     new_out.bias.data[:old_num_classes] = old_bias.to(device)
             print(f"  [セグヘッド更新] {old_num_classes}クラスの重みを引き継ぎ、"
                   f"{num_classes - old_num_classes}クラスをランダム初期化")
+
+            # 旧クラスのチャンネルは勾配を遮断して上書きを防止
+            # backward hook: 旧クラス分の勾配をゼロにする
+            def _freeze_old_channels_hook(grad, n=old_num_classes):
+                grad = grad.clone()
+                grad[:n] = 0.0
+                return grad
+
+            new_out.weight.register_hook(_freeze_old_channels_hook)
+            if new_out.bias is not None:
+                def _freeze_old_bias_hook(grad, n=old_num_classes):
+                    grad = grad.clone()
+                    grad[:n] = 0.0
+                    return grad
+                new_out.bias.register_hook(_freeze_old_bias_hook)
+
+            self._frozen_seg_head_channels = old_num_classes
         else:
             print(f"  [セグヘッド更新] {num_classes}クラスをランダム初期化")
+            self._frozen_seg_head_channels = 0
 
         for param in new_out.parameters():
             param.requires_grad = True

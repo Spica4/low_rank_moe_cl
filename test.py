@@ -213,6 +213,9 @@ def main():
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--output_csv", type=str, default="results.csv",
                         help="結果を保存するCSVファイルパス")
+    parser.add_argument("--force_step1_expert", action="store_true",
+                        help="Step1データ評価時に Expert0 を強制使用 (routing バイパス)"
+                             " → ルーティング vs ヘッド破壊のどちらが主因か診断できる")
     args = parser.parse_args()
 
     config = Config()
@@ -268,12 +271,22 @@ def main():
     if args.step1_test_dir:
         config.data.step1_val_dir = args.step1_test_dir
         step1_loader = get_dataloader(config, step=1, is_train=False, use_cache=False)
+
+        # --force_step1_expert: Expert0 強制使用でルーティングをバイパス
+        # routing バイアスとヘッド破壊のどちらが主因かを切り分けるための診断オプション
+        force_ts = 1 if args.force_step1_expert else None
+        eval_name = (
+            f"{config.data.step1_name} (post-CL / step2 ckpt / Expert0強制)"
+            if args.force_step1_expert
+            else f"{config.data.step1_name} (post-CL / step2 ckpt)"
+        )
         post_per_sample_step1, post_avg_step1 = evaluate_dataset(
             model, step1_loader,
             config=config,
             num_classes=config.data.total_num_classes,
             device=args.device,
-            dataset_name=f"{config.data.step1_name} (post-CL / step2 ckpt)",
+            dataset_name=eval_name,
+            training_step=force_ts,
         )
         all_per_sample.append((config.data.step1_name, post_per_sample_step1))
         all_avg.append((config.data.step1_name, post_avg_step1))
