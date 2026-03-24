@@ -45,27 +45,22 @@ class _MoEFFNWrapper(nn.Module):
         model = self._model_ref()
 
         if model._is_test_mode and self.moe_ffn.num_experts > 1:
-            # テスト時: 生ロジットで Softmax 競合ルーティング → Top-1ハードルーティング
-            # GW(sigmoid) の絶対値比較ではなく、ロジット空間で softmax を適用し
-            # 相対的な確率として比較することで独立 sigmoid のバイアス問題を解消する
-            logits = []
+            # テスト時: 論文通りの Top-1 ハードルーティング
+            # GW = text_emb · sigmoid(input_proj(x)) を各エキスパートで計算し argmax
             gws = []
             for step_idx in range(model.current_step):
                 gating = model.gating_modules[f"step{step_idx}_{self._layer_key}"]
-                logit = gating.compute_logits(x, model.text_embeddings[step_idx])
-                logits.append(logit)
-                gws.append(torch.sigmoid(logit))
+                gw = gating.compute_gating_weights(x, model.text_embeddings[step_idx])
+                gws.append(gw)
 
-            # Softmax で正規化してからルーティング先を決定 [..., num_experts]
-            routing_probs = F.softmax(torch.cat(logits, dim=-1), dim=-1)
-            expert_indices = routing_probs.argmax(dim=-1)
+            # 論文: argmax([GW_step0, GW_step1]) でエキスパートを選択
+            expert_indices = torch.cat(gws, dim=-1).argmax(dim=-1)  # [..., num_experts] → [...]
 
             output = torch.zeros_like(x)
             for step_idx in range(model.current_step):
                 mask = (expert_indices == step_idx)
                 if not mask.any():
                     continue
-                # 入力変調は sigmoid GW を使用（学習時と同じスケール）
                 gated_x = x * gws[step_idx]
                 expert_out = self.moe_ffn.forward_single_expert(gated_x, step_idx)
                 output = output + expert_out * mask.unsqueeze(-1).expand_as(output).float()
@@ -124,17 +119,14 @@ class _MoEAttnWrapper(nn.Module):
         model = self._model_ref()
 
         if model._is_test_mode and self.moe_attn.num_experts > 1:
-            # テスト時: 生ロジットで Softmax 競合ルーティング → Top-1ハードルーティング
-            logits = []
+            # テスト時: 論文通りの Top-1 ハードルーティング
             gws = []
             for step_idx in range(model.current_step):
                 gating = model.gating_modules[f"step{step_idx}_{self._layer_key}"]
-                logit = gating.compute_logits(x, model.text_embeddings[step_idx])
-                logits.append(logit)
-                gws.append(torch.sigmoid(logit))
+                gw = gating.compute_gating_weights(x, model.text_embeddings[step_idx])
+                gws.append(gw)
 
-            routing_probs = F.softmax(torch.cat(logits, dim=-1), dim=-1)  # [B*nW, N, num_experts]
-            expert_indices = routing_probs.argmax(dim=-1)  # [B*nW, N]
+            expert_indices = torch.cat(gws, dim=-1).argmax(dim=-1)  # [B*nW, N]
 
             output = torch.zeros_like(x)
             for step_idx in range(model.current_step):

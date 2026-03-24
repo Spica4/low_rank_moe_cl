@@ -3,13 +3,19 @@
 論文 Section 2.2 / Figure 3
 
 学習時:
-  テキスト記述 → CLIPテキストエンコーダ → テキストembedding
-  テキストembedding × (Linear + Sigmoid)(入力) → ゲーティング重み (GW)
+  テキスト記述 → CLIPテキストエンコーダ → テキストembedding (固定)
+  入力 x → Linear → Sigmoid → x_proj  [論文の順序: 入力を先に変換]
+  GW = text_embedding · x_proj         [内積: 入力がどれだけテキストに類似するか]
   GW × 入力 → エキスパートへの入力
 
 テスト時:
-  各エキスパートのテキストembeddingからGWを計算
-  Top-1ハードルーティング: 各トークンで重みの大きいエキスパートを選択
+  各エキスパートのGWを計算してTop-1ハードルーティング
+
+[設計上の注意]
+  入力を先にCLIP空間に射影してからテキストembeddingと内積を取る。
+  テキストembeddingを特徴空間に射影する逆順は NG。
+  理由: 未学習時にGW≈0 (中立) になるため、学習後に正しくドメイン識別できる。
+  逆順だとGW≈0.5 (バイアス)になり、Step1未学習のGW_step0が常に不利になる。
 """
 import torch
 import torch.nn as nn
@@ -20,14 +26,11 @@ from typing import List, Optional
 class LanguageGuidedGating(nn.Module):
     """
     言語ガイド付きゲーティングモジュール
-    
-    CLIPテキストエンコーダで生成したembeddingを使い、
-    入力トークンごとにどのエキスパートを使うか決定する。
-    
+
     論文 Figure 3:
-    - テキスト記述 → CLIP Text Encoder → Emb [1, clip_dim]
-    - 入力 x [n, c] → Linear → Sigmoid → GW [n, 1]
-    - Emb と 入力を行列積 → Attention weight
+    - テキスト記述 → CLIP Text Encoder → text_emb [clip_dim]  (固定)
+    - 入力 x [..., embed_dim] → Linear → Sigmoid → x_proj [..., clip_dim]
+    - GW = einsum(x_proj, text_emb) → [..., 1]  (外側のSigmoidなし)
     """
 
     def __init__(
@@ -39,8 +42,9 @@ class LanguageGuidedGating(nn.Module):
         self.embed_dim = embed_dim
         self.clip_embed_dim = clip_embed_dim
 
-        # テキストembeddingを特徴次元に射影
-        self.text_proj = nn.Linear(clip_embed_dim, embed_dim, bias=False)
+        # 入力特徴量をCLIP埋め込み空間に射影
+        # 論文: "Linear + Sigmoid を入力に適用してからテキストembeddingと行列積"
+        self.input_proj = nn.Linear(embed_dim, clip_embed_dim, bias=True)
 
     def compute_gating_weights(
         self,
@@ -51,24 +55,22 @@ class LanguageGuidedGating(nn.Module):
         単一エキスパートのゲーティング重みを計算
 
         論文 Figure 3 の Training stage:
-        x: [batch, n, c] (n = h×w×d for 3D, n = seq_len)
-        text_embedding: [1, clip_dim] or [clip_dim]
+          x: [..., embed_dim]
+          text_embedding: [clip_dim] or [1, clip_dim]
 
-        return: gating_weights [batch, n, 1]
+        return: GW [..., 1]
+          未学習時: input_proj ≈ 0 → sigmoid(0) = 0.5 → GW = text_emb · 0.5
+          L2正規化済みtext_embの要素平均 ≈ 0 → GW ≈ 0 (中立)
+          学習後: ドメイン特徴に対して正、異ドメインに対して小/負の値
         """
         if text_embedding.dim() == 1:
-            text_embedding = text_embedding.unsqueeze(0)
+            text_embedding = text_embedding.unsqueeze(0)  # [1, clip_dim]
 
-        # テキストembeddingを特徴空間に射影 [1, embed_dim]
-        text_feat = self.text_proj(text_embedding)  # [1, embed_dim]
+        # 入力をCLIP空間に射影 → Sigmoid [..., clip_dim]
+        x_proj = torch.sigmoid(self.input_proj(x))  # [..., clip_dim]
 
-        # 入力とテキストの類似度（行列積）
-        # x: [..., c], text_feat: [1, c] → [..., 1]
-        # 省略記号 ... により 3D [B, N, C] / 5D [B, D, H, W, C] 両方に対応
-        similarity = torch.einsum('...c,mc->...m', x, text_feat)  # [..., 1]
-
-        # ゲーティング重み（sigmoid）
-        gating_weights = torch.sigmoid(similarity)  # [..., 1]
+        # テキストembeddingとの内積 → GW [..., 1]
+        gating_weights = torch.einsum('...c,mc->...m', x_proj, text_embedding)  # [..., 1]
 
         return gating_weights
 
@@ -78,16 +80,13 @@ class LanguageGuidedGating(nn.Module):
         text_embedding: torch.Tensor,
     ) -> torch.Tensor:
         """
-        Sigmoid 適用前の生ロジットを返す（テスト時のSoftmax競合ルーティング用）
+        テスト時のルーティング用にGWをそのまま返す（compute_gating_weightsと同一）
 
-        x: [batch, n, c]
-        text_embedding: [1, clip_dim] or [clip_dim]
-        return: logits [..., 1]
+        x: [..., embed_dim]
+        text_embedding: [clip_dim] or [1, clip_dim]
+        return: GW [..., 1]
         """
-        if text_embedding.dim() == 1:
-            text_embedding = text_embedding.unsqueeze(0)
-        text_feat = self.text_proj(text_embedding)  # [1, embed_dim]
-        return torch.einsum('...c,mc->...m', x, text_feat)  # [..., 1]
+        return self.compute_gating_weights(x, text_embedding)
 
     def forward_train(
         self,
