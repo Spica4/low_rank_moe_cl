@@ -162,7 +162,11 @@ def print_forgetting_table(baseline_avg: dict, post_avg: dict, forgetting: dict,
 
     print("-" * len(header))
     bm = baseline_avg.get("mean", float("nan"))
-    pm = post_avg.get("mean", float("nan"))
+    # post_CL の平均も baseline と同じ step1 クラスのみで計算する
+    # post_avg["mean"] には class_14 以降が含まれる場合があり baseline と比較不能になるため
+    pm_vals = [post_avg.get(k, float("nan")) for k in step1_classes]
+    pm_vals = [v for v in pm_vals if not math.isnan(v)]
+    pm = sum(pm_vals) / len(pm_vals) if pm_vals else float("nan")
     fm = forgetting.get("mean", float("nan"))
     bm_str = f"{bm:.4f}" if not math.isnan(bm) else "  NaN"
     pm_str = f"{pm:.4f}" if not math.isnan(pm) else "  NaN"
@@ -216,6 +220,9 @@ def main():
     parser.add_argument("--force_step1_expert", action="store_true",
                         help="Step1データ評価時に Expert0 を強制使用 (routing バイパス)"
                              " → ルーティング vs ヘッド破壊のどちらが主因か診断できる")
+    parser.add_argument("--force_step2_expert", action="store_true",
+                        help="Step2データ評価時に Expert1 を強制使用 (routing バイパス)"
+                             " → Expert1 が LiTS を学習できているか診断できる")
     args = parser.parse_args()
 
     config = Config()
@@ -295,12 +302,19 @@ def main():
     if args.step2_test_dir:
         config.data.step2_val_dir = args.step2_test_dir
         step2_loader = get_dataloader(config, step=2, is_train=False, use_cache=False)
+        force_ts2 = 2 if args.force_step2_expert else None
+        step2_eval_name = (
+            f"{config.data.step2_name} (Expert1強制)"
+            if args.force_step2_expert
+            else config.data.step2_name
+        )
         per_sample, avg_dice = evaluate_dataset(
             model, step2_loader,
             config=config,
             num_classes=config.data.total_num_classes,
             device=args.device,
-            dataset_name=config.data.step2_name,
+            dataset_name=step2_eval_name,
+            training_step=force_ts2,
         )
         all_per_sample.append((config.data.step2_name, per_sample))
         all_avg.append((config.data.step2_name, avg_dice))
