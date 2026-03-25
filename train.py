@@ -137,8 +137,14 @@ def validate(
     dataloader,
     num_classes: int,
     device: str,
+    training_step: int = None,
 ):
-    """検証"""
+    """検証
+
+    Args:
+        training_step: None = ルーティング使用（最終評価向け）
+                       int  = 指定ステップのエキスパートを強制使用（学習中モニタリング向け）
+    """
     model.eval()
     all_dice = {}
 
@@ -150,7 +156,7 @@ def validate(
             inputs=images,
             roi_size=(96, 96, 96),
             sw_batch_size=1,
-            predictor=lambda x: model(x, training_step=None),
+            predictor=lambda x: model(x, training_step=training_step),
             overlap=0.5,
         )
 
@@ -284,8 +290,9 @@ def train_step(
               f"Loss: {train_loss:.4f} | LR: {current_lr:.6f}")
 
         # 検証（一定間隔）
+        # 学習中は現ステップのエキスパートを強制使用してルーティングの影響を除く
         if epoch % 10 == 0 or epoch == epochs:
-            val_dice = validate(model, val_loader, num_classes, device)
+            val_dice = validate(model, val_loader, num_classes, device, training_step=step)
             mean_dice = val_dice.get("mean", 0.0)
 
             print(f"  → Val Dice (mean): {mean_dice:.4f}")
