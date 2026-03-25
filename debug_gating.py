@@ -16,10 +16,10 @@ debug_gating.py: ゲーティングスコアの可視化デバッグスクリプ
     - 各レイヤーの mean(GW_step0) と mean(GW_step1) を比較
 
 使い方:
-  python debug_gating.py \\
-    --checkpoint checkpoints/step2_best.pth \\
-    --btcv_image /path/to/btcv/test/images/sample.nii.gz \\
-    --lits_image /path/to/lits/test/images/sample.nii.gz \\
+  python debug_gating.py \
+    --checkpoint checkpoints/step2_best.pth \
+    --btcv_image /deeparea/sokabe/Dataset/BTCV/Abdomen/test/images/img0036.nii.gz \
+    --lits_image /deeparea/sokabe/Dataset/LiTS/liver_tumor/test/images/volume-109.nii \
     --output_dir debug_gating_output
 """
 
