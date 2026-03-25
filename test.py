@@ -17,8 +17,8 @@
   # 忘却率を合わせて計算する場合
   python test.py --checkpoint checkpoints/step2_best.pth \
                  --step1_checkpoint checkpoints/step1_best.pth \
-                 --step1_test_dir /path/to/step1/test \
-                 --step2_test_dir /path/to/step2/test \
+                 --step1_test_dir /deeparea/sokabe/Dataset/BTCV/Abdomen/test \
+                 --step2_test_dir /deeparea/sokabe/Dataset/LiTS/liver_tumor/test \
                  --output_csv results.csv
 """
 import argparse
