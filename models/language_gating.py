@@ -52,6 +52,24 @@ class LanguageGuidedGating(nn.Module):
         # テキストembeddingを特徴次元に射影
         self.text_proj = nn.Linear(clip_embed_dim, embed_dim, bias=False)
 
+    def compute_logits(
+        self,
+        x: torch.Tensor,
+        text_embedding: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        sigmoid 適用前の生ロジットを計算
+
+        x: [..., embed_dim]
+        text_embedding: [clip_dim] or [1, clip_dim]
+        return: logit [..., 1]  (−∞, +∞)
+        """
+        if text_embedding.dim() == 1:
+            text_embedding = text_embedding.unsqueeze(0)
+
+        text_feat = self.text_proj(text_embedding)               # [1, embed_dim]
+        return torch.einsum('...c,mc->...m', x, text_feat)       # [..., 1]
+
     def compute_gating_weights(
         self,
         x: torch.Tensor,
@@ -64,12 +82,7 @@ class LanguageGuidedGating(nn.Module):
         text_embedding: [clip_dim] or [1, clip_dim]
         return: GW [..., 1]  in (0, 1)
         """
-        if text_embedding.dim() == 1:
-            text_embedding = text_embedding.unsqueeze(0)
-
-        text_feat = self.text_proj(text_embedding)               # [1, embed_dim]
-        logit = torch.einsum('...c,mc->...m', x, text_feat)      # [..., 1]
-        return torch.sigmoid(logit)
+        return torch.sigmoid(self.compute_logits(x, text_embedding))
 
     def forward_train(
         self,
