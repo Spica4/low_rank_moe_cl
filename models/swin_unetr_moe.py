@@ -69,7 +69,9 @@ class _MoEFFNWrapper(nn.Module):
         # 学習時: 現ステップ固有のゲーティングで変調してから固定エキスパートへ
         expert_idx = model._current_expert_idx
         gating = model.gating_modules[f"step{expert_idx}_{self._layer_key}"]
-        gated_x = gating.forward_train(x, model.text_embeddings[expert_idx])
+        gw = gating.compute_gating_weights(x, model.text_embeddings[expert_idx])
+        model._gw_log.append(gw)  # ルーティングロス計算用に蓄積
+        gated_x = x * gw
         return self.moe_ffn.forward_single_expert(gated_x, expert_idx)
 
 
@@ -141,7 +143,9 @@ class _MoEAttnWrapper(nn.Module):
         # 学習時: 現ステップ固有のゲーティングで変調してから固定エキスパートへ
         expert_idx = model._current_expert_idx
         gating = model.gating_modules[f"step{expert_idx}_{self._layer_key}"]
-        gated_x = gating.forward_train(x, model.text_embeddings[expert_idx])
+        gw = gating.compute_gating_weights(x, model.text_embeddings[expert_idx])
+        model._gw_log.append(gw)  # ルーティングロス計算用に蓄積
+        gated_x = x * gw
         return self.moe_attn.forward_single_expert(gated_x, expert_idx, mask=mask)
 
 
@@ -186,6 +190,9 @@ class SwinUNETRMoE(nn.Module):
 
         # 各レイヤーの embed_dim を記録（prepare_step でゲーティング生成に使用）
         self._layer_embed_dims: Dict[str, int] = {}
+
+        # ルーティング正則化ロス用 GW 蓄積バッファ（学習時のみ使用）
+        self._gw_log: list = []
 
         # MoEを作成し、ブロックのmlp/attnを差し替え
         self._inject_moe_layers()
@@ -537,6 +544,8 @@ class SwinUNETRMoE(nn.Module):
         Returns:
             logits: [batch, num_classes, H, W, D]
         """
+        self._gw_log.clear()  # 各 forward の GW を新規蓄積
+
         if training_step is not None:
             # 学習時: 指定ステップのエキスパートを固定使用
             self._current_expert_idx = training_step - 1
@@ -546,6 +555,22 @@ class SwinUNETRMoE(nn.Module):
             self._is_test_mode = True
 
         return self.base_model(x)
+
+    def get_routing_loss(self) -> "torch.Tensor":
+        """
+        ルーティング正則化ロスを返す。
+
+        GW → 1 を促すことで現ステップのゲーティングがドメイン特徴に反応するよう学習する。
+        routing_loss = mean(1 - GW) ∈ [0, 1)
+
+        forward() 後に呼び出すこと。呼び出し後 _gw_log はクリアされる。
+        テスト時や _gw_log が空のときは 0 を返す。
+        """
+        if not self._gw_log:
+            return torch.tensor(0.0, device=next(self.parameters()).device)
+        all_gw = torch.cat([gw.reshape(-1) for gw in self._gw_log])
+        self._gw_log.clear()
+        return (1.0 - all_gw).mean()
 
     def get_trainable_params(self) -> List[nn.Parameter]:
         """現在のステップで学習可能なパラメータを返す"""

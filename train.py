@@ -85,8 +85,15 @@ def train_one_epoch(
     step: int,
     use_amp: bool = True,
     amp_dtype: str = "bf16",
+    routing_loss_weight: float = 0.0,
 ):
-    """1エポックの学習"""
+    """1エポックの学習
+
+    Args:
+        routing_loss_weight: ルーティング正則化ロスの重み。
+            0.0 で無効。0.01 程度から試すことを推奨。
+            GW → 1 を促し lazy routing (GW ≈ 0.5 固定) を防ぐ。
+    """
     model.train()
     total_loss = 0.0
     num_batches = 0
@@ -108,6 +115,8 @@ def train_one_epoch(
             with autocast(device_type="cuda", dtype=dtype):
                 logits = model(images, training_step=step)
                 loss = criterion(logits, labels)
+                if routing_loss_weight > 0:
+                    loss = loss + routing_loss_weight * model.get_routing_loss()
             if scaler is not None:
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
@@ -121,6 +130,8 @@ def train_one_epoch(
         else:
             logits = model(images, training_step=step)
             loss = criterion(logits, labels)
+            if routing_loss_weight > 0:
+                loss = loss + routing_loss_weight * model.get_routing_loss()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.get_trainable_params(), max_norm=1.0)
             optimizer.step()
@@ -281,6 +292,7 @@ def train_step(
         train_loss = train_one_epoch(
             model, train_loader, optimizer, criterion, scaler,
             device, step, config.use_amp, config.amp_dtype,
+            routing_loss_weight=config.train.routing_loss_weight,
         )
         scheduler.step()
 

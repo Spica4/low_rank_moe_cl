@@ -65,6 +65,11 @@ class TrainConfig:
     optimizer: str = "adamw"
     scheduler: str = "cosine"
 
+    # ルーティング正則化ロスの重み
+    # 0.0 で無効。0.01 程度から試すことを推奨。
+    # GW → 1 を促し lazy routing (GW ≈ 0.5 固定) を防ぐ。
+    routing_loss_weight: float = 0.01
+
     # チェックポイント
     checkpoint_dir: str = "./checkpoints"
     save_every: int = 50
