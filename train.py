@@ -195,10 +195,6 @@ def train_step(
 
     model = SwinUNETRMoE(config).to(device)
 
-    # 前ステップのチェックポイントを読み込み
-    if resume_path is not None and step > 1:
-        load_checkpoint(model, resume_path, device=device)
-
     # ステップ設定
     if step == 1:
         text_desc = config.data.step1_text_description
@@ -206,20 +202,33 @@ def train_step(
         epochs = config.train.step1_epochs
         lr = config.train.step1_lr
         wd = config.train.step1_weight_decay
+
+        # Step1 は事前学習チェックポイントからの resume があれば読み込む
+        if resume_path is not None:
+            load_checkpoint(model, resume_path, device=device)
+
     elif step == 2:
-        # Step1の準備も先にやっておく（エキスパート1を追加してから凍結するため）
-        if model.current_step == 0:
-            model.prepare_step(
-                step=1,
-                text_description=config.data.step1_text_description,
-                num_classes=config.data.step1_num_classes,
-                device=device,
-            )
+        # Step2 の重みロード順序が重要:
+        #   1. prepare_step(1) で Expert0 と seg_head の構造を作ってから
+        #   2. load_checkpoint() で Step1 の学習済み重みを復元する
+        #
+        # 逆順にすると experts_A_i が空 ParameterList のまま load されて
+        # LoRA 重み / gating / seg_head が全て無視される（strict=False でも不一致）。
+        model.prepare_step(
+            step=1,
+            text_description=config.data.step1_text_description,
+            num_classes=config.data.step1_num_classes,
+            device=device,
+        )
+        if resume_path is not None:
+            load_checkpoint(model, resume_path, device=device)
+
         text_desc = config.data.step2_text_description
         num_classes = config.data.total_num_classes
         epochs = config.train.step2_epochs
         lr = config.train.step2_lr
         wd = config.train.step2_weight_decay
+
     else:
         raise ValueError(f"未対応のステップ: {step}")
 
